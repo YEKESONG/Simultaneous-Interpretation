@@ -1,11 +1,17 @@
 # 每次推送都在 Linux、Windows、macOS 上跑单元测试。
 # Windows 上额外按 README 的方法完整安装一遍依赖，检查 Windows 专用模块能否导入——
 # 开发机是 Mac，没法在真机上跑 Windows，这是最便宜的“至少能装上、能导入”的保证。
+#
+# GitHub 要登录才能看 Actions 日志，所以每一步都把输出存成文件，失败时用 scripts/ci_annotate.py
+# 写成错误注释，这样通过公开 API 就能读到失败原因。
 name: tests
 
 on:
   push:
   pull_request:
+
+env:
+  PYTHONUTF8: "1"  # Windows 虚拟机的控制台编码是 cp1252，打印中文会报 UnicodeEncodeError
 
 jobs:
   unit-tests:
@@ -14,9 +20,12 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Qt 在 Linux 上需要的系统库
@@ -25,24 +34,34 @@ jobs:
       - name: 安装测试所需的依赖（不装识别模型相关的大包）
         run: python -m pip install numpy httpx PySide6-Essentials pytest
       - name: 单元测试
-        run: python -m pytest
+        run: set -o pipefail; python -m pytest -rf --tb=short 2>&1 | tee ci.log
         env:
           QT_QPA_PLATFORM: offscreen
+      - name: 失败时把日志写成注释
+        if: failure()
+        run: python scripts/ci_annotate.py ci.log "单元测试失败（${{ matrix.os }}）"
 
   windows-install:
     runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: 按 README 完整安装依赖
-        run: python -m pip install -r requirements.txt
-      - name: Windows 专用模块能否导入
+        run: set -o pipefail; python -m pip install -r requirements.txt 2>&1 | tee ci.log
+      - name: 检查 Windows 专用模块、语音检测模型和命令行
         run: |
-          python -c "import pyaudiowpatch, soxr, faster_whisper; print('依赖导入成功')"
-          python -c "import simul_interp.audio.windows_loopback, simul_interp.asr.faster_whisper_backend; print('模块导入成功')"
-      - name: 语音检测模型能否加载（随 pip 包附带，不联网）
-        run: python -c "from simul_interp.vad import SileroVad; import numpy as np; print(SileroVad()(np.zeros(512, np.float32)))"
-      - name: 命令行能否启动
-        run: python -m simul_interp config
+          set -o pipefail
+          {
+            python -c "import pyaudiowpatch, soxr, faster_whisper; print('依赖导入成功')"
+            python -c "import simul_interp.audio.windows_loopback, simul_interp.asr.faster_whisper_backend; print('模块导入成功')"
+            python -c "from simul_interp.vad import SileroVad; import numpy as np; print('VAD 输出', SileroVad()(np.zeros(512, np.float32)))"
+            python -m simul_interp config
+          } 2>&1 | tee ci.log
+      - name: 失败时把日志写成注释
+        if: failure()
+        run: python scripts/ci_annotate.py ci.log "Windows 安装检查失败"

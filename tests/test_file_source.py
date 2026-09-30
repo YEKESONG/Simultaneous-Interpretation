@@ -36,7 +36,8 @@ def test_realtime_pacing(tmp_path):
     started = time.monotonic()
     chunks = collect(FileAudioSource(wav, speed=1.0, tail_silence_s=0.0))
     elapsed = time.monotonic() - started
-    # 按实时速度送，0.5 秒的音频大约要 0.5 秒送完；每一块都在“播放完”之后才送出
+    # 按实时速度送，0.5 秒的音频大约要 0.5 秒送完；每一块都在“播放完”之后才送出。
+    # 容差留到 20 ms：Python 3.12 及以前在 Windows 上 time.monotonic() 的精度只有 15.6 ms
     assert 0.45 < elapsed < 0.8
     for chunk in chunks:
-        assert chunk.received_at - started >= chunk.end - 0.01
+        assert chunk.received_at - started >= chunk.end - 0.02
