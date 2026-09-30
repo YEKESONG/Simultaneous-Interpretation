@@ -29,7 +29,8 @@ class TranscriptWriter:
         self._write("\n".join(header) + "\n", mode="w")
 
     def add(self, unit: TranslationUnit) -> None:
-        elapsed = int(unit.ready_at - self._started)
+        # 四舍五入而不是 int() 截断：两个很大的时钟读数相减会得到 64.9999999 这样的值，截断就少了 1 秒
+        elapsed = round(unit.ready_at - self._started)
         stamp = f"{elapsed // 60:02d}:{elapsed % 60:02d}"
         translation = unit.translation or (f"（翻译失败：{unit.error}）" if unit.error else "（未翻译）")
         self._write(f"**[{stamp}]** {unit.source}\n\n> {translation}\n\n")

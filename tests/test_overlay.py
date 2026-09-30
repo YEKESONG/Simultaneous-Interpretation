@@ -18,6 +18,10 @@ def overlay(tmp_path):
     settings = QSettings(str(tmp_path / "overlay.ini"), QSettings.Format.IniFormat)
     widget = Overlay(UiConfig(font_size=22, max_lines=2), settings=settings)
     widget.resize(700, 260)
+    # 先在 offscreen 平台上把窗口显示出来、处理完事件，保证尺寸已经生效：
+    # 没显示的窗口什么时候收到调整大小的事件，各平台不一样（Windows 上字幕区的宽度会在测试中途才变）
+    widget.show()
+    QApplication.processEvents()
     widget.set_status("")
     yield widget
     widget.close()
