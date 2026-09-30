@@ -22,7 +22,10 @@ class AsrBackend(Protocol):
     def load(self) -> None:
         """加载模型并预热。必须在之后调用 transcribe 的同一个线程里调用（MLX 的计算流是按线程分的）。"""
 
-    def transcribe(self, audio: np.ndarray, prompt: str = "", word_timestamps: bool = False) -> list[Segment]: ...
+    def transcribe(
+        self, audio: np.ndarray, prompt: str = "", word_timestamps: bool = False, max_tokens: int | None = None
+    ) -> list[Segment]:
+        """max_tokens：最多生成多少个 token，防止陷入重复循环时一直生成、解码时间暴涨。"""
 
 
 @dataclass

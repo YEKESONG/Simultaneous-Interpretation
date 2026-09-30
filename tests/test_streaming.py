@@ -1,6 +1,6 @@
 import numpy as np
 
-from simul_interp.asr.streaming import StreamingTranscriber, align_prefix, repeated_head
+from simul_interp.asr.streaming import StreamingTranscriber, align_prefix, repeated_head, strip_repetition
 from simul_interp.asr.types import Segment
 from simul_interp.audio.base import SAMPLE_RATE
 
@@ -28,7 +28,7 @@ class FakeBackend:
     def load(self):
         pass
 
-    def transcribe(self, audio, prompt="", word_timestamps=False):
+    def transcribe(self, audio, prompt="", word_timestamps=False, max_tokens=None):
         self.calls += 1
         t0 = self.transcriber.buffer_start
         t1 = t0 + len(audio) / SAMPLE_RATE
@@ -41,8 +41,9 @@ class FakeBackend:
             elif s < t1:
                 items.append((s - t0, t1 - t0, w[: max(1, len(w) // 2)]))
         last_end = max((e for _, e, _ in self.words), default=0.0)
-        if self.hallucinate_on_silence and t1 - last_end > 0.3:
-            items.append((last_end - t0 + 0.05, t1 - t0, "Merci."))
+        # Whisper 对着“整段都是静音”或“词后面拖着一段静音”的音频，常会补一句 Merci.
+        if self.hallucinate_on_silence and (not items or t1 - last_end > 0.3):
+            items.append((max(0.0, last_end - t0) + 0.05, t1 - t0, "Merci."))
         segments, current = [], []
         for item in items:
             current.append(item)
@@ -79,6 +80,37 @@ def test_align_prefix_tolerates_small_changes():
 def test_repeated_head():
     assert repeated_head("tous. Nous allons".split(), "Bonjour à tous.".split()) == 1
     assert repeated_head("Nous allons".split(), "Bonjour à tous.".split()) == 0
+
+
+def test_strip_repetition_loop():
+    looped = "notons que la première version de la version de la version de la version de".split()
+    kept = strip_repetition(looped)
+    assert looped[: len(kept)] == kept  # 只截断，不改前面的内容
+    assert " ".join(kept).count("version") <= 2
+    assert strip_repetition("non non non".split()) == "non non non".split()  # 单个词重复 3 次可能是真的
+    normal = "nous allons faire le point sur le projet".split()
+    assert strip_repetition(normal) == normal
+
+
+def test_no_final_pass_on_silence_after_sentence_trim():
+    words = timeline("Bonjour à tous. Merci beaucoup.")
+    backend = FakeBackend(words, hallucinate_on_silence=True)
+    t = StreamingTranscriber(backend)
+    backend.transcriber = t
+    t.start_utterance(0.0)
+    committed = []
+    # 两句话到 1.9 秒说完；最后两次识别在 1.92 和 1.96 秒，“beaucoup.” 两次一致被确认，缓冲区在句末切过
+    for until in (0.6, 1.0, 1.3, 1.6, 1.92, 1.96):
+        feed(t, until - t.buffer_end)
+        update = t.process()
+        if update and update.committed:
+            committed += update.committed.split()
+    assert committed == "Bonjour à tous. Merci beaucoup.".split()
+    assert t.buffer_s < 0.2  # 切完只剩句末的一点静音
+    calls = backend.calls
+    # VAD 判定说完时，上一次识别（1.96 秒）没有覆盖到“说完 + 0.1 秒”，以前会对着剩下的静音再识别一次
+    final = t.finish(speech_end=words[-1][1])
+    assert final.committed == "" and backend.calls == calls  # 现在不再识别，也就不会“补”出 Merci.
 
 
 def test_word_is_committed_only_after_two_agreeing_passes():
@@ -148,8 +180,19 @@ def test_too_short_utterance_is_ignored():
     assert final.committed == "" and backend.calls == 0
 
 
+def test_cut_moves_to_the_nearest_pause():
+    # 1 秒“说话”（噪声）、0.1 秒停顿（1.0~1.1 秒）、再 1 秒说话
+    rng = np.random.default_rng(0)
+    speech = lambda s: rng.normal(0, 0.3, int(s * SAMPLE_RATE)).astype(np.float32)  # noqa: E731
+    _, t = make([])
+    t.start_utterance(0.0)
+    t.add_audio(np.concatenate([speech(1.0), np.zeros(int(0.1 * SAMPLE_RATE), np.float32), speech(1.0)]))
+    # 时间戳说词在 0.88 秒结束（估早了），直接切会切在词中间；应该挪到真正的停顿里
+    assert 1.0 <= t.quiet_point(0.88) <= 1.1
+
+
 def test_force_trim_when_no_sentence_end():
-    words = timeline(" ".join(["mot"] * 60))  # 一直说、没有句号，约 21 秒
+    words = timeline(" ".join(f"mot{i}" for i in range(60)))  # 一直说、没有句号，约 21 秒（词各不相同，不是重复循环）
     backend, t = make(words, max_buffer_s=6.0)
     t.start_utterance(0.0)
     committed = []

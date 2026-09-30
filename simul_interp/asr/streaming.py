@@ -31,6 +31,8 @@ _SENTENCE_END = re.compile(r"[.?!…][\"'»”)]*$")
 MIN_UTTERANCE_S = 0.45  # 从开始（含 0.2 秒句首预留）到停止说话不足这么长的，多半是杂音，不识别
 HISTORY_WORDS = 200
 MAX_WORDS_PER_S = 6.0  # 正常法语语速约每秒 3 个词，快的也很少超过 5 个
+TOKENS_PER_S = 10  # 生成 token 的上限按音频长度算：正常语速每秒不到 5 个 token（含标点、时间戳），留足余量
+MIN_NEW_SPEECH_S = 0.3  # 上一次识别之后又说了不到这么久（且之前的都已确认），就不再做最后一次识别
 _CLAUSE_END = re.compile(r"[,;:.?!…][\"'»”)]*$")
 
 
@@ -69,6 +71,24 @@ def common_prefix(a: list[str], b: list[str]) -> int:
             break
         count += 1
     return count
+
+
+def strip_repetition(words: list[str], min_repeats: int = 3) -> list[str]:
+    """Whisper 偶尔陷入重复循环（实测：“de la version de la version de la version…”）。
+    同一个 2~4 词的短语连续出现 min_repeats 次以上，就只保留第一次；单个词要连续 min_repeats+1 次才算，
+    因为 “non non non” 这种可能是真的。"""
+    normalized = [norm(w) for w in words]
+    for i in range(len(words)):
+        for n in range(1, 5):
+            gram = normalized[i : i + n]
+            if len(gram) < n:
+                break
+            repeats = 1
+            while normalized[i + repeats * n : i + (repeats + 1) * n] == gram:
+                repeats += 1
+            if repeats >= min_repeats + (1 if n == 1 else 0):
+                return words[: i + n]
+    return words
 
 
 def repeated_head(hyp: list[str], history: list[str], max_n: int = 5) -> int:
@@ -168,10 +188,11 @@ class StreamingTranscriber:
         return align_prefix(self.committed, hyp)
 
     def _recognize(self, word_timestamps: bool = False):
-        segments = self.backend.transcribe(self.buffer, self.prompt(), word_timestamps=word_timestamps)
+        max_tokens = int(self.buffer_s * TOKENS_PER_S) + 20
+        segments = self.backend.transcribe(self.buffer, self.prompt(), word_timestamps, max_tokens)
         hyp, ends, times = flatten(segments)
         limit = int(self.buffer_s * MAX_WORDS_PER_S) + 3  # 语速上限，截掉“编出来”的部分
-        return segments, hyp[:limit], ends, times
+        return segments, strip_repetition(hyp[:limit]), ends, times
 
     def process(self) -> AsrUpdate | None:
         """说话期间调用：重新识别整个缓冲区，确认和上一次一致的部分。"""
@@ -209,12 +230,16 @@ class StreamingTranscriber:
         end = self.buffer_end
         words: list[str] = []
         if speech_end - self.utterance_start >= MIN_UTTERANCE_S:
+            unheard = speech_end - max(self.buffer_start, self.last_pass_end)  # 上一次识别之后又说了多久
             if self.last_pass_end >= speech_end + 0.1 and (self.tail or self.committed):
                 words = self.tail  # 上一次识别已经覆盖到说话结束，直接确认，省一次识别
+            elif unheard < MIN_NEW_SPEECH_S and not self.tail:
+                # 上一次听到的内容已经全部确认，之后几乎没再说话：不再识别。
+                # 对着剩下的静音识别，Whisper 会“补”出一句（实测 “Merci.”、“chaîne.”），而且这次不经过两次一致的检验
+                words = []
             else:
-                # 句尾那段静音会诱发 Whisper “补”一句（典型的是 “Merci.”），这次识别不经过两次一致的检验，
-                # 所以先把缓冲区截到停止说话后 0.2 秒
-                keep = int(max(0.0, speech_end + 0.2 - self.buffer_start) * SAMPLE_RATE)
+                # 句尾那段静音会诱发 Whisper “补”一句，所以先把缓冲区截到停止说话后 0.1 秒
+                keep = int(max(0.0, speech_end + 0.1 - self.buffer_start) * SAMPLE_RATE)
                 self.buffer = self.buffer[:keep]
                 _, hyp, _, _ = self._recognize()
                 words = hyp[self._covered(hyp) :]
@@ -231,8 +256,30 @@ class StreamingTranscriber:
 
     # ---- 切缓冲区 ----
 
+    def quiet_point(self, seconds: float, before: float = 0.25, after: float = 0.25) -> float:
+        """在 seconds 前后找声音最小的 20 毫秒，返回它的中点。
+
+        Whisper 给的分段、逐词时间戳常有 0.1~0.3 秒的误差，直接照着切可能切在词中间：
+        下一段缓冲区开头只剩半个词，会被识别成别的词（实测 utilisateurs 的尾音被识别成 heures）。
+        词与词之间的真实停顿比时间戳可靠，所以切在附近最安静的地方。"""
+        frame = int(0.02 * SAMPLE_RATE)
+        lo = max(0, int((seconds - before) * SAMPLE_RATE))
+        hi = min(len(self.buffer), int((seconds + after) * SAMPLE_RATE))
+        count = (hi - lo) // frame
+        if count < 2:
+            return seconds
+        frames = self.buffer[lo : lo + count * frame].reshape(count, frame)
+        energy = np.mean(np.square(frames), axis=1)
+        centers = (lo + np.arange(count) * frame + frame / 2) / SAMPLE_RATE
+        # 按能量从小到大排，一样安静时取离原切点最近的
+        quietest = int(np.lexsort((np.abs(centers - seconds), energy))[0])
+        return float(centers[quietest])
+
     def _cut(self, seconds: float, hyp_before_cut: list[str]) -> None:
-        """把缓冲区前 seconds 秒切掉，对应的已确认词移到 history。"""
+        """把缓冲区前 seconds 秒（会微调到附近最安静的地方）切掉，对应的已确认词移到 history。"""
+        seconds = self.quiet_point(seconds)
+        if not 0 < seconds < self.buffer_s:
+            return
         moved = align_prefix(hyp_before_cut, self.committed)
         self.history = (self.history + self.committed[:moved])[-HISTORY_WORDS:]
         self.committed = self.committed[moved:]
@@ -273,7 +320,8 @@ class StreamingTranscriber:
     def _force_trim(self) -> list[str]:
         """一直在说话、长时间没有句号，缓冲区超长又没有可切的分段时：
         用一次逐词时间戳，在倒数 2 秒处强制切开，切点之前的词直接确认。"""
-        segments = self.backend.transcribe(self.buffer, self.prompt(), word_timestamps=True)
+        max_tokens = int(self.buffer_s * TOKENS_PER_S) + 20
+        segments = self.backend.transcribe(self.buffer, self.prompt(), True, max_tokens)
         timed = [w for segment in segments for w in segment.words]
         keep_from = self.buffer_s - 2.0
         before = [i for i, (_, end, _) in enumerate(timed) if end <= keep_from]

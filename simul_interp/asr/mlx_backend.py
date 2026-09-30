@@ -54,7 +54,9 @@ class MlxWhisperBackend:
         logger.info("加载识别模型 %s ……", self.model_id)
         self.transcribe(np.zeros(16000, dtype=np.float32))  # 预热：加载权重、编译 GPU 内核
 
-    def transcribe(self, audio: np.ndarray, prompt: str = "", word_timestamps: bool = False) -> list[Segment]:
+    def transcribe(
+        self, audio: np.ndarray, prompt: str = "", word_timestamps: bool = False, max_tokens: int | None = None
+    ) -> list[Segment]:
         result = self._transcribe(
             audio,
             path_or_hf_repo=self._path,
@@ -65,6 +67,7 @@ class MlxWhisperBackend:
             initial_prompt=prompt or None,
             word_timestamps=word_timestamps,
             verbose=None,
+            sample_len=max_tokens,  # 默认最多 224 个 token；陷入重复循环时会一直生成到上限
         )
         segments = []
         for s in result["segments"]:
