@@ -46,9 +46,10 @@ extra_body = { thinking = { type = "disabled" } }
 
 [ui]
 mode = "overlay"           # overlay = 透明悬浮窗；console = 只在终端输出
-font_size = 26
-opacity = 0.6
-max_lines = 3
+font_size = 22             # 译文（中文）字号
+source_font_ratio = 0.82   # 原文字号 = 译文字号 × 这个比例
+opacity = 0.6              # 背景不透明度
+max_lines = 3              # 最多保留几对原文译文
 
 [transcript]
 enabled = true

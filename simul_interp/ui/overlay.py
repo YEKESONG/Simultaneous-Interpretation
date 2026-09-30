@@ -1,9 +1,14 @@
 """透明悬浮字幕窗（PySide6）。
 
-- 半透明圆角背景：上面一行法语原文（小字、浅灰），下面一行中文译文（大字、白色），最底下是正在说的话；
+设计目标是“稳”：眼睛盯着一个地方就能读到最新的译文，窗口不闪、不跳、不变大小。
+- 只显示“原文 + 译文”成对的内容：一对的译文翻好了，原文和译文才一起出现。投机翻译命中时，
+  原文确认的那一刻译文通常已经翻好了，所以几乎不增加延迟。正在识别的暂定文字不显示，免得一小段一小段地闪；
+- 新的一对出现在最下面，旧的平滑地往上滑走（约 0.2 秒），不会一下子跳上去；最新的一对最亮，越旧越暗；
+- 窗口大小固定，只随手动拖动改变，不会被文字撑大或缩小；
+- 右上角一个小圆点：听到有人说话时变绿，表示它在工作，又不占字幕的位置；
 - 始终置顶、不抢焦点；macOS 上还能浮在全屏视频、全屏会议的上面；
 - 拖动移动，右下角调整大小；右键菜单调字号、背景深浅、鼠标穿透；菜单栏图标里可以解锁穿透和退出；
-- 识别和翻译在后台线程跑，结果通过 Qt 信号交给界面线程，每 50 毫秒最多刷新一次。
+- 识别和翻译在后台线程跑，结果通过 Qt 信号交给界面线程。
 """
 
 from __future__ import annotations
@@ -19,23 +24,34 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import NamedTuple
 
-from PySide6.QtCore import QObject, QPoint, QRect, QSettings, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QGuiApplication, QIcon, QPainter, QPixmap
-from PySide6.QtWidgets import (
-    QApplication,
-    QGraphicsDropShadowEffect,
-    QLabel,
-    QMenu,
-    QSizeGrip,
-    QSystemTrayIcon,
-    QVBoxLayout,
-    QWidget,
+from PySide6.QtCore import (
+    QEasingCurve,
+    QObject,
+    QPoint,
+    QPointF,
+    QRect,
+    QSettings,
+    Qt,
+    QTimer,
+    QVariantAnimation,
+    Signal,
 )
+from PySide6.QtGui import QAction, QColor, QFont, QGuiApplication, QIcon, QPainter, QPixmap, QTextDocument
+from PySide6.QtWidgets import QApplication, QGraphicsDropShadowEffect, QMenu, QSizeGrip, QSystemTrayIcon, QWidget
 
+from ..clock import now
 from ..config import UiConfig
 from ..translate import TranslationUnit
 
 logger = logging.getLogger(__name__)
+
+STYLE_VERSION = 2  # 字幕样式改版时加 1：旧版本保存的字号不再沿用
+STREAM_FALLBACK_S = 1.0  # 译文开始出来后迟迟翻不完：最多等这么久，先显示已经翻出的部分
+WAIT_FALLBACK_S = 4.0  # 译文一个字都没出来：最多等这么久，先只显示原文
+SCROLL_MS = 220  # 新内容出现时，旧内容往上滑的时间
+MAX_KEPT = 30  # 最多记住多少个翻译单元（显示的只是最后几对）
+# 按新旧程度的颜色（原文, 译文）：最新的一对最亮，越旧越暗，眼睛自然落在最新的译文上
+AGE_COLORS = [("#dcdcdc", "#ffffff"), ("#a0a0a0", "#c8c8c8"), ("#7c7c7c", "#989898")]
 
 
 class UnitSnapshot(NamedTuple):
@@ -71,6 +87,106 @@ class QtView:
         self.bridge.status.emit(text)
 
 
+def pair_html(unit: UnitSnapshot, age: int, zh: int, fr: int) -> str:
+    """一对原文和译文的富文本。age = 0 是最新的一对，越旧颜色越暗。"""
+    fr_color, zh_color = AGE_COLORS[min(age, len(AGE_COLORS) - 1)]
+    esc = html.escape
+    source = f'<p style="margin:0; color:{fr_color}; font-size:{fr}px;">{esc(unit.source)}</p>'
+    if unit.error:
+        translation = f'<span style="color:#ff8a80;">翻译失败：{esc(unit.error[:80])}</span>'
+    elif unit.done and not unit.translation:
+        return source  # 不翻译（没有密钥）时只有原文
+    else:
+        translation = esc(unit.translation)
+        if not unit.done:  # 还没翻完（等太久才会走到这里）：末尾加一个灰色省略号
+            translation += '<span style="color:#8a8a8a;">…</span>'
+    return source + f'<p style="margin:0; color:{zh_color}; font-size:{zh}px;">{translation}</p>'
+
+
+class CaptionView(QWidget):
+    """字幕区：每一对原文译文排成一块，从下往上堆。内容变化时先让画面停在原位，再平滑地滑到新位置。"""
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.gap = 8  # 两对之间的空隙
+        self._blocks: list[tuple[object, str, QTextDocument]] = []  # (键, 富文本, 排好版的文档)，旧 → 新
+        self._shift = 0.0  # 整体往下的额外位移，动画结束时回到 0
+        self._anim = QVariantAnimation(self)
+        self._anim.setDuration(SCROLL_MS)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.valueChanged.connect(self._on_shift)
+
+    def keys(self) -> list:
+        return [key for key, _, _ in self._blocks]
+
+    def set_blocks(self, blocks: list[tuple[object, str]]) -> None:
+        """blocks：从旧到新的 (键, 富文本)。键相同的块是同一段内容（颜色、译文可能变了）。"""
+        if [(k, h) for k, h, _ in self._blocks] == blocks:
+            return
+        old_offsets = self._offsets()
+        cache = {key: (text, doc) for key, text, doc in self._blocks}
+        rebuilt = []
+        for key, text in blocks:
+            cached = cache.get(key)
+            doc = cached[1] if cached and cached[0] == text else self._layout(text)
+            rebuilt.append((key, text, doc))
+        self._blocks = rebuilt
+        new_offsets = self._offsets()
+        # 以“原来就有、现在还在”的最新一块为锚：它先停在原来的位置，再平滑地滑到新位置。
+        # 旧内容从上面移走不会带动别的块，因为所有块都是从底部往上排的
+        anchor = next((key for key, _, _ in reversed(rebuilt) if key in old_offsets), None)
+        start = self._shift + new_offsets[anchor] - old_offsets[anchor] if anchor is not None else 0.0
+        self._anim.stop()
+        if abs(start) > 0.5:
+            self._anim.setStartValue(start)
+            self._anim.setEndValue(0.0)
+            self._anim.start()
+        else:
+            self._shift = 0.0
+            self.update()
+
+    def _layout(self, text: str) -> QTextDocument:
+        doc = QTextDocument(self)
+        doc.setDocumentMargin(0)
+        doc.setHtml(text)
+        doc.setTextWidth(max(1, self.width()))
+        return doc
+
+    def _offsets(self) -> dict:
+        """每一块的顶边离字幕区底边多远（从最新的一块往上累加）。"""
+        offsets, total = {}, 0.0
+        for key, _, doc in reversed(self._blocks):
+            total += doc.size().height()
+            offsets[key] = total
+            total += self.gap
+        return offsets
+
+    def _on_shift(self, value) -> None:
+        self._shift = float(value)
+        self.update()
+
+    def resizeEvent(self, event) -> None:
+        for _, _, doc in self._blocks:
+            doc.setTextWidth(max(1, self.width()))
+        super().resizeEvent(event)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setClipRect(self.rect())
+        y = self.height() + self._shift
+        for _, _, doc in reversed(self._blocks):
+            height = doc.size().height()
+            y -= height
+            if y + height < 0:
+                break  # 再往上的已经滑出字幕区了
+            painter.save()
+            painter.translate(0, y)
+            doc.drawContents(painter)
+            painter.restore()
+            y -= self.gap
+
+
 class Overlay(QWidget):
     def __init__(self, cfg: UiConfig, settings: QSettings | None = None) -> None:
         """settings：保存位置、字号等的地方；默认是系统的用户设置，测试时可以传一个临时文件。"""
@@ -87,93 +203,102 @@ class Overlay(QWidget):
         self.setWindowTitle("同传字幕")
 
         self.settings = settings or QSettings("SimulInterp", "Overlay")
+        if int(self.settings.value("style_version", 1)) < STYLE_VERSION:
+            self.settings.remove("font_size")  # 样式改过：旧的字号不再沿用，位置和大小保留
+            self.settings.setValue("style_version", STYLE_VERSION)
         self.font_size = int(self.settings.value("font_size", cfg.font_size))
+        self.source_ratio = cfg.source_font_ratio
         self.opacity = float(self.settings.value("opacity", cfg.opacity))
         self.max_lines = cfg.max_lines
         self.click_through = False
         self.on_reconnect = None  # 由 run_overlay 设置：重新连接音频设备
 
         self.units: OrderedDict[int, UnitSnapshot] = OrderedDict()
-        self.pending = self.partial = self.live_translation = ""
+        self._seen_at: dict[int, float] = {}  # 每个单元第一次出现的时刻
+        self._first_text_at: dict[int, float] = {}  # 每个单元译文开始出现的时刻
+        self.hearing = False
         self.status = "正在启动……"
 
-        self.label = QLabel(self)
-        self.label.setTextFormat(Qt.TextFormat.RichText)
-        self.label.setWordWrap(True)
-        self.label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
-        self.label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        shadow = QGraphicsDropShadowEffect(self.label)  # 文字阴影：背景调得很透明时，压在亮色画面上也看得清
+        self.captions = CaptionView(self)
+        shadow = QGraphicsDropShadowEffect(self.captions)  # 文字阴影：背景调得很透明时，压在亮色画面上也看得清
         shadow.setBlurRadius(8)
         shadow.setOffset(0, 1)
         shadow.setColor(QColor(0, 0, 0, 230))
-        self.label.setGraphicsEffect(shadow)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 12, 20, 14)
-        layout.addWidget(self.label)
+        self.captions.setGraphicsEffect(shadow)
         self.grip = QSizeGrip(self)
         self.grip.resize(16, 16)
 
         self._drag_from: QPoint | None = None
-        self._dirty = True
         self._timer = QTimer(self)
-        self._timer.timeout.connect(self._render_if_dirty)
+        self._timer.timeout.connect(self.refresh)  # “等太久先显示”要看时间，所以定时检查；内容没变时什么也不做
         self._timer.start(50)
         self._restore_geometry()
 
     # ---- 数据更新（主线程） ----
 
     def set_live(self, pending: str, partial: str, translation: str = "") -> None:
-        self.pending, self.partial, self.live_translation = pending, partial, translation
-        self._dirty = True
+        """正在识别的文字不显示（会一小段一小段地闪），只用来点亮右上角的小圆点。"""
+        hearing = bool(pending or partial)
+        if hearing != self.hearing:
+            self.hearing = hearing
+            self.update()
 
     def set_unit(self, unit: UnitSnapshot) -> None:
+        moment = now()
+        self._seen_at.setdefault(unit.id, moment)
+        if unit.translation:
+            self._first_text_at.setdefault(unit.id, moment)
         self.units[unit.id] = unit
-        while len(self.units) > self.max_lines:
-            self.units.popitem(last=False)
-        self._dirty = True
+        while len(self.units) > MAX_KEPT:
+            old_id, _ = self.units.popitem(last=False)
+            self._seen_at.pop(old_id, None)
+            self._first_text_at.pop(old_id, None)
 
     def set_status(self, text: str) -> None:
         self.status = text
-        self._dirty = True
 
     def clear(self) -> None:
         self.units.clear()
-        self.pending = self.partial = self.live_translation = ""
-        self._dirty = True
+        self._seen_at.clear()
+        self._first_text_at.clear()
+
+    # ---- 显示什么 ----
+
+    def visible_units(self, moment: float | None = None) -> list[UnitSnapshot]:
+        """按顺序显示“准备好了”的单元：译文翻完了，或者等得太久了。
+        前一个还没准备好时，后面的也先不显示，这样新内容总是出现在最下面，已显示的位置不会被插队打乱。"""
+        moment = now() if moment is None else moment
+        shown = []
+        for unit in self.units.values():
+            first = self._first_text_at.get(unit.id)
+            ready = (
+                unit.done
+                or bool(unit.error)
+                or (first is not None and moment - first >= STREAM_FALLBACK_S)
+                or moment - self._seen_at.get(unit.id, moment) >= WAIT_FALLBACK_S
+            )
+            if not ready:
+                break
+            shown.append(unit)
+        return shown[-self.max_lines :]
+
+    def blocks(self, moment: float | None = None) -> list[tuple[object, str]]:
+        zh = self.font_size
+        fr = max(11, round(zh * self.source_ratio))
+        shown = self.visible_units(moment)
+        blocks: list[tuple[object, str]] = [
+            (unit.id, pair_html(unit, len(shown) - 1 - index, zh, fr)) for index, unit in enumerate(shown)
+        ]
+        if self.status:
+            status = html.escape(self.status)
+            blocks.append(("status", f'<p style="margin:0; color:#ffd479; font-size:{fr}px;">{status}</p>'))
+        return blocks
+
+    def refresh(self) -> None:
+        self.captions.gap = max(6, round(self.font_size * 0.4))
+        self.captions.set_blocks(self.blocks())
 
     # ---- 绘制 ----
-
-    def _render_if_dirty(self) -> None:
-        if self._dirty:
-            self._dirty = False
-            self.label.setText(self.render_html())
-
-    def render_html(self) -> str:
-        zh = self.font_size
-        fr = max(11, round(zh * 0.62))
-        esc = html.escape
-        parts = []
-        for unit in self.units.values():
-            parts.append(f'<p style="margin:0; color:#d0d0d0; font-size:{fr}px;">{esc(unit.source)}</p>')
-            if unit.error:
-                text = f'<span style="color:#ff8a80;">翻译失败：{esc(unit.error[:80])}</span>'
-            else:
-                text = esc(unit.translation)
-                if not unit.done:  # 还在流式输出：末尾加一个灰色省略号提示
-                    text += '<span style="color:#9a9a9a;">…</span>'
-            parts.append(f'<p style="margin:0 0 6px 0; color:#ffffff; font-size:{zh}px;">{text}</p>')
-        if self.pending or self.partial:
-            parts.append(
-                f'<p style="margin:0; font-size:{fr}px; color:#e8e8e8;">▸ {esc(self.pending)} '
-                f'<span style="color:#9a9a9a;">{esc(self.partial)}</span></p>'
-            )
-        if self.live_translation:  # 投机译文：原文还没完全确认，用浅蓝色，和已确认的白色译文区分开
-            parts.append(f'<p style="margin:0; color:#a9c7ff; font-size:{zh}px;">{esc(self.live_translation)}</p>')
-        if self.status:
-            parts.append(f'<p style="margin:0; font-size:{fr}px; color:#ffd479;">{esc(self.status)}</p>')
-        if not parts:
-            parts.append(f'<p style="margin:0; font-size:{fr}px; color:#9a9a9a;">正在收听……</p>')
-        return "".join(parts)
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -181,8 +306,13 @@ class Overlay(QWidget):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(12, 12, 14, round(255 * self.opacity)))
         painter.drawRoundedRect(self.rect(), 14, 14)
+        # 右上角的小圆点：听到有人说话时变绿
+        painter.setBrush(QColor(92, 214, 128) if self.hearing else QColor(130, 130, 130, 150))
+        painter.drawEllipse(QPointF(self.width() - 14, 12), 3.5, 3.5)
 
     def resizeEvent(self, event) -> None:
+        # 手动摆放字幕区，不用布局管理器：布局会根据内容改窗口的最小尺寸，文字一多窗口就被撑大
+        self.captions.setGeometry(20, 20, max(1, self.width() - 40), max(1, self.height() - 34))
         self.grip.move(self.width() - self.grip.width() - 4, self.height() - self.grip.height() - 4)
         super().resizeEvent(event)
 
@@ -222,7 +352,6 @@ class Overlay(QWidget):
 
     def change_font(self, delta: int) -> None:
         self.font_size = max(14, min(64, self.font_size + delta))
-        self._dirty = True
 
     def change_opacity(self, delta: float) -> None:
         self.opacity = round(max(0.0, min(0.95, self.opacity + delta)), 2)
@@ -243,7 +372,7 @@ class Overlay(QWidget):
             return
         screen = QGuiApplication.primaryScreen().availableGeometry()
         width = min(1100, int(screen.width() * 0.7))
-        height = round(self.font_size * 8.5)
+        height = round(self.font_size * 9)
         self.setGeometry(screen.center().x() - width // 2, screen.bottom() - height - 60, width, height)
 
     def save_settings(self) -> None:
@@ -349,14 +478,15 @@ def run_overlay(cfg, interpreter_factory) -> int:
     worker = threading.Thread(target=work, name="interpreter", daemon=True)
     worker.start()
 
-    snapshot_dir = os.environ.get("SI_OVERLAY_SNAPSHOTS")  # 开发调试：每 10 秒把字幕窗截图存下来
+    # 开发调试：定时把字幕窗截图存下来（默认每 10 秒；SI_OVERLAY_SNAPSHOT_MS 可以改间隔，用来检查闪烁和跳动）
+    snapshot_dir = os.environ.get("SI_OVERLAY_SNAPSHOTS")
     if snapshot_dir:
         Path(snapshot_dir).mkdir(parents=True, exist_ok=True)
         snapshots = QTimer(overlay)
         snapshots.timeout.connect(
-            lambda: overlay.grab().save(str(Path(snapshot_dir) / f"overlay_{time.strftime('%H%M%S')}.png"))
+            lambda: overlay.grab().save(str(Path(snapshot_dir) / f"overlay_{time.time():.2f}.png"))
         )
-        snapshots.start(10_000)
+        snapshots.start(int(os.environ.get("SI_OVERLAY_SNAPSHOT_MS", "10000")))
 
     tray = QSystemTrayIcon(QIcon(tray_icon_pixmap()), app)
     tray.setToolTip("法中同传")

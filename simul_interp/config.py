@@ -67,9 +67,10 @@ class TranslateConfig:
 @dataclass
 class UiConfig:
     mode: str = "overlay"  # overlay = 透明悬浮窗；console = 只在终端输出
-    font_size: int = 26
+    font_size: int = 22  # 译文（中文）字号，像素
+    source_font_ratio: float = 0.82  # 原文字号 = 译文字号 × 这个比例（两者别差太多，方便对照）
     opacity: float = 0.6  # 悬浮窗背景不透明度
-    max_lines: int = 3  # 悬浮窗里保留几句
+    max_lines: int = 3  # 悬浮窗里最多保留几对原文译文（放不下的会从上边滑出去）
 
 
 @dataclass
