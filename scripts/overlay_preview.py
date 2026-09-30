@@ -38,12 +38,15 @@ def main() -> int:
     settings = QSettings(str(Path(tempfile.mkdtemp()) / "preview.ini"), QSettings.Format.IniFormat)
     overlay = Overlay(UiConfig(), settings=settings)
     overlay.font_size, overlay.opacity = 22, 0.6
-    overlay.resize(920, 220)
+    overlay.resize(920, 300)
     for unit in EXAMPLES:
         overlay.set_unit(unit)
-    overlay.set_live("Est-ce que quelqu'un a des", "questions sur ce", "")  # 只会点亮右上角的小圆点
+    # 下一句正在识别：显示在底部的当前句区域，暂定部分灰色，译文的位置先留白
+    overlay.set_live("Est-ce que quelqu'un a des", "questions sur ce point", "")
     overlay.set_status("")
     overlay.refresh()
+    overlay.captions._anim.stop()
+    overlay.captions._on_anim_done()  # 截图前让滑动动画直接走完
     shot = overlay.grab()  # Retina 屏上是 2 倍像素，画布也要按同样的缩放比例建
 
     ratio = shot.devicePixelRatio()

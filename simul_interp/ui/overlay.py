@@ -1,11 +1,12 @@
 """透明悬浮字幕窗（PySide6）。
 
-设计目标是“稳”：眼睛盯着一个地方就能读到最新的译文，窗口不闪、不跳、不变大小。
-- 只显示“原文 + 译文”成对的内容：一对的译文翻好了，原文和译文才一起出现。投机翻译命中时，
-  原文确认的那一刻译文通常已经翻好了，所以几乎不增加延迟。正在识别的暂定文字不显示，免得一小段一小段地闪；
-- 新的一对出现在最下面，旧的平滑地往上滑走（约 0.2 秒），不会一下子跳上去；最新的一对最亮，越旧越暗；
-- 窗口大小固定，只随手动拖动改变，不会被文字撑大或缩小；
-- 右上角一个小圆点：听到有人说话时变绿，表示它在工作，又不占字幕的位置；
+设计目标是“稳”：内容怎么更新，都不能带着别的文字跳来跳去。
+- 底部是高度固定的“当前句”区域：正在识别的法语在这里实时更新（已确认的白色、暂定的灰色），
+  译文的位置先空着，翻好了直接填进这块空白。区域里怎么变，都不会带动别的内容；
+- 上方是已经翻好的历史，越旧越暗。下一句开始时，当前这一对才从底部区域平滑地滑上去（约 0.2 秒），
+  底部区域清空，开始显示下一句；
+- 当前句区域至少能放两行原文和两行译文，只在遇到特别长的句子时才扩大；窗口大小只随手动拖动改变；
+- 右上角一个小圆点：听到有人说话时变绿；启动时的状态提示是左上角的一行小字，都不占字幕的位置；
 - 始终置顶、不抢焦点；macOS 上还能浮在全屏视频、全屏会议的上面；
 - 拖动移动，右下角调整大小；右键菜单调字号、背景深浅、鼠标穿透；菜单栏图标里可以解锁穿透和退出；
 - 识别和翻译在后台线程跑，结果通过 Qt 信号交给界面线程。
@@ -46,12 +47,13 @@ from ..translate import TranslationUnit
 logger = logging.getLogger(__name__)
 
 STYLE_VERSION = 2  # 字幕样式改版时加 1：旧版本保存的字号不再沿用
-STREAM_FALLBACK_S = 1.0  # 译文开始出来后迟迟翻不完：最多等这么久，先显示已经翻出的部分
-WAIT_FALLBACK_S = 4.0  # 译文一个字都没出来：最多等这么久，先只显示原文
-SCROLL_MS = 220  # 新内容出现时，旧内容往上滑的时间
+STREAM_FALLBACK_S = 1.0  # 译文开始出来后迟迟翻不完：最多等这么久，就先当它翻好了往下走
+WAIT_FALLBACK_S = 4.0  # 译文一个字都没出来：最多等这么久
+SCROLL_MS = 220  # 一对原文译文从当前句区域滑上去的时间
 MAX_KEPT = 30  # 最多记住多少个翻译单元（显示的只是最后几对）
 # 按新旧程度的颜色（原文, 译文）：最新的一对最亮，越旧越暗，眼睛自然落在最新的译文上
 AGE_COLORS = [("#dcdcdc", "#ffffff"), ("#a0a0a0", "#c8c8c8"), ("#7c7c7c", "#989898")]
+LIVE_COLORS = ("#e6e6e6", "#8f8f8f")  # 正在识别的原文：已确认的部分、暂定的部分
 
 
 class UnitSnapshot(NamedTuple):
@@ -87,64 +89,124 @@ class QtView:
         self.bridge.status.emit(text)
 
 
-def pair_html(unit: UnitSnapshot, age: int, zh: int, fr: int) -> str:
-    """一对原文和译文的富文本。age = 0 是最新的一对，越旧颜色越暗。"""
-    fr_color, zh_color = AGE_COLORS[min(age, len(AGE_COLORS) - 1)]
-    esc = html.escape
-    source = f'<p style="margin:0; color:{fr_color}; font-size:{fr}px;">{esc(unit.source)}</p>'
+def source_html(text: str, color: str, fr: int) -> str:
+    return f'<p style="margin:0; color:{color}; font-size:{fr}px;">{html.escape(text)}</p>'
+
+
+def translation_html(unit: UnitSnapshot, color: str, zh: int) -> str:
+    """译文的富文本；还没有译文时返回空串（位置留白）。"""
     if unit.error:
-        translation = f'<span style="color:#ff8a80;">翻译失败：{esc(unit.error[:80])}</span>'
-    elif unit.done and not unit.translation:
-        return source  # 不翻译（没有密钥）时只有原文
+        text = f'<span style="color:#ff8a80;">翻译失败：{html.escape(unit.error[:80])}</span>'
+    elif not unit.translation:
+        return ""
     else:
-        translation = esc(unit.translation)
-        if not unit.done:  # 还没翻完（等太久才会走到这里）：末尾加一个灰色省略号
-            translation += '<span style="color:#8a8a8a;">…</span>'
-    return source + f'<p style="margin:0; color:{zh_color}; font-size:{zh}px;">{translation}</p>'
+        text = html.escape(unit.translation)
+        if not unit.done:  # 还在翻：末尾加一个灰色省略号
+            text += '<span style="color:#8a8a8a;">…</span>'
+    return f'<p style="margin:0; color:{color}; font-size:{zh}px;">{text}</p>'
+
+
+def pair_html(unit: UnitSnapshot, age: int, zh: int, fr: int) -> str:
+    """历史里的一对原文和译文。age = 0 是最新的一对，越旧颜色越暗。"""
+    fr_color, zh_color = AGE_COLORS[min(age, len(AGE_COLORS) - 1)]
+    return source_html(unit.source, fr_color, fr) + translation_html(unit, zh_color, zh)
+
+
+def live_html(pending: str, partial: str, fr: int) -> str:
+    """正在识别的原文：已确认的部分白色，暂定的尾巴灰色。"""
+    done_color, guess_color = LIVE_COLORS
+    return (
+        f'<p style="margin:0; color:{done_color}; font-size:{fr}px;">{html.escape(pending)} '
+        f'<span style="color:{guess_color};">{html.escape(partial)}</span></p>'
+    )
 
 
 class CaptionView(QWidget):
-    """字幕区：每一对原文译文排成一块，从下往上堆。内容变化时先让画面停在原位，再平滑地滑到新位置。"""
+    """字幕区，自己排版、自己画，大小不随内容变化，分两部分：
+
+    - 底部的“当前句”区域：高度固定，至少能放两行原文和两行译文。里面的内容怎么变（识别中的原文更新、
+      译文填进留白），都不会带动别的内容。区域高度只在遇到放不下的长句时扩大，一对滑上去时才可能恢复；
+    - 上方的历史：原文译文对从下往上堆。一对从当前句区域滑上去时，先让它停在原来的位置，
+      再平滑地滑到历史里；这 0.2 秒里先不画新的当前句，免得两者重叠。
+    """
 
     def __init__(self, parent: QWidget) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.gap = 8  # 两对之间的空隙
-        self._blocks: list[tuple[object, str, QTextDocument]] = []  # (键, 富文本, 排好版的文档)，旧 → 新
-        self._shift = 0.0  # 整体往下的额外位移，动画结束时回到 0
+        self._fonts = (0, 0)
+        self._history: list[tuple[object, str, QTextDocument]] = []  # (键, 富文本, 排好版的文档)，旧 → 新
+        self._slot_html = ("", "")  # 当前句的 (原文, 译文)
+        self._slot_docs = (self._layout(""), self._layout(""))
+        self._slot_base = 0.0  # 当前句区域的最小高度：两行原文 + 两行译文
+        self.slot_height = 0.0  # 当前句区域的实际高度
+        self._shift = 0.0  # 历史整体往下的额外位移，动画结束时回到 0
+        self._slot_hidden = False
         self._anim = QVariantAnimation(self)
         self._anim.setDuration(SCROLL_MS)
         self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._anim.valueChanged.connect(self._on_shift)
+        self._anim.finished.connect(self._on_anim_done)
 
-    def keys(self) -> list:
-        return [key for key, _, _ in self._blocks]
+    def history_keys(self) -> list:
+        return [key for key, _, _ in self._history]
 
-    def set_blocks(self, blocks: list[tuple[object, str]]) -> None:
-        """blocks：从旧到新的 (键, 富文本)。键相同的块是同一段内容（颜色、译文可能变了）。"""
-        if [(k, h) for k, h, _ in self._blocks] == blocks:
+    def history_top(self, key) -> float:
+        """某一对历史（动画结束后）的顶边在字幕区里的纵坐标，测试用来检查位置有没有被带动。"""
+        return self.height() - self._offsets()[key]
+
+    def set_fonts(self, fr: int, zh: int) -> None:
+        if (fr, zh) == self._fonts:
             return
+        self._fonts = (fr, zh)
+        self._slot_base = self._text_height(fr, 2) + self._text_height(zh, 2)
+        self.slot_height = max(self._slot_base, self._slot_needed())
+        self.update()
+
+    def set_content(self, history: list[tuple[object, str]], slot: tuple[str, str]) -> None:
+        """history：从旧到新的 (键, 一对原文译文的富文本)；slot：当前句的 (原文富文本, 译文富文本)。"""
+        history_changed = [(k, h) for k, h, _ in self._history] != history
+        if not history_changed and slot == self._slot_html:
+            return
+        old_keys = self.history_keys()
         old_offsets = self._offsets()
-        cache = {key: (text, doc) for key, text, doc in self._blocks}
-        rebuilt = []
-        for key, text in blocks:
-            cached = cache.get(key)
-            doc = cached[1] if cached and cached[0] == text else self._layout(text)
-            rebuilt.append((key, text, doc))
-        self._blocks = rebuilt
+        if history_changed:
+            cache = {key: (text, doc) for key, text, doc in self._history}
+            rebuilt = []
+            for key, text in history:
+                cached = cache.get(key)
+                doc = cached[1] if cached and cached[0] == text else self._layout(text)
+                rebuilt.append((key, text, doc))
+            self._history = rebuilt
+        if slot != self._slot_html:
+            self._slot_html = slot
+            self._slot_docs = (self._layout(slot[0]), self._layout(slot[1]))
+
+        new_keys = self.history_keys()
+        moved_up = bool(new_keys) and new_keys[-1] not in old_keys  # 有一对从当前句区域滑进了历史
+        # 当前句区域：平时只增不减（里面怎么变都不影响上面）；一对滑上去的时候才按新内容重新定高度
+        needed = max(self._slot_base, self._slot_needed())
+        self.slot_height = needed if moved_up else max(self.slot_height, needed)
+
         new_offsets = self._offsets()
-        # 以“原来就有、现在还在”的最新一块为锚：它先停在原来的位置，再平滑地滑到新位置。
-        # 旧内容从上面移走不会带动别的块，因为所有块都是从底部往上排的
-        anchor = next((key for key, _, _ in reversed(rebuilt) if key in old_offsets), None)
-        start = self._shift + new_offsets[anchor] - old_offsets[anchor] if anchor is not None else 0.0
+        anchor = next((key for key in reversed(new_keys) if key in old_offsets), None)
+        if anchor is not None:
+            start = self._shift + new_offsets[anchor] - old_offsets[anchor]  # 原来就在的内容先停在原位
+        elif moved_up:
+            start = new_offsets[new_keys[-1]] - self.slot_height  # 第一条历史：从当前句区域的位置出发
+        else:
+            start = 0.0
         self._anim.stop()
+        self._slot_hidden = moved_up and abs(start) > 0.5
         if abs(start) > 0.5:
             self._anim.setStartValue(start)
             self._anim.setEndValue(0.0)
             self._anim.start()
         else:
             self._shift = 0.0
-            self.update()
+        self.update()
+
+    # ---- 排版 ----
 
     def _layout(self, text: str) -> QTextDocument:
         doc = QTextDocument(self)
@@ -153,29 +215,47 @@ class CaptionView(QWidget):
         doc.setTextWidth(max(1, self.width()))
         return doc
 
+    def _text_height(self, px: int, lines: int) -> float:
+        sample = "<br>".join(["国 Ag"] * lines)
+        return self._layout(f'<p style="margin:0; font-size:{px}px;">{sample}</p>').size().height()
+
+    def _slot_needed(self) -> float:
+        return sum(doc.size().height() for doc in self._slot_docs if not doc.isEmpty())
+
     def _offsets(self) -> dict:
-        """每一块的顶边离字幕区底边多远（从最新的一块往上累加）。"""
-        offsets, total = {}, 0.0
-        for key, _, doc in reversed(self._blocks):
+        """每一对历史的顶边离字幕区底边多远：先是当前句区域，再往上逐对累加。"""
+        offsets, total = {}, self.slot_height + self.gap
+        for key, _, doc in reversed(self._history):
             total += doc.size().height()
             offsets[key] = total
             total += self.gap
         return offsets
 
+    # ---- 动画和绘制 ----
+
     def _on_shift(self, value) -> None:
         self._shift = float(value)
         self.update()
 
+    def _on_anim_done(self) -> None:
+        self._shift = 0.0
+        self._slot_hidden = False
+        self.update()
+
     def resizeEvent(self, event) -> None:
-        for _, _, doc in self._blocks:
+        for _, _, doc in self._history:
             doc.setTextWidth(max(1, self.width()))
+        for doc in self._slot_docs:
+            doc.setTextWidth(max(1, self.width()))
+        self.slot_height = max(self._slot_base, self._slot_needed())
         super().resizeEvent(event)
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setClipRect(self.rect())
-        y = self.height() + self._shift
-        for _, _, doc in reversed(self._blocks):
+        slot_top = self.height() - self.slot_height
+        y = slot_top - self.gap + self._shift
+        for _, _, doc in reversed(self._history):
             height = doc.size().height()
             y -= height
             if y + height < 0:
@@ -185,6 +265,16 @@ class CaptionView(QWidget):
             doc.drawContents(painter)
             painter.restore()
             y -= self.gap
+        if self._slot_hidden:
+            return
+        source, translation = self._slot_docs
+        painter.save()
+        painter.setClipRect(0, int(slot_top), self.width(), int(self.slot_height) + 1)
+        painter.translate(0, slot_top)
+        source.drawContents(painter)
+        painter.translate(0, 0 if source.isEmpty() else source.size().height())  # 译文紧接在原文下面
+        translation.drawContents(painter)
+        painter.restore()
 
 
 class Overlay(QWidget):
@@ -216,6 +306,8 @@ class Overlay(QWidget):
         self.units: OrderedDict[int, UnitSnapshot] = OrderedDict()
         self._seen_at: dict[int, float] = {}  # 每个单元第一次出现的时刻
         self._first_text_at: dict[int, float] = {}  # 每个单元译文开始出现的时刻
+        self.live = ("", "")  # 正在识别的 (已确认但还没凑成一句的原文, 暂定的尾巴)
+        self._promoted = -1  # 已经滑进历史的最新一个单元编号（滑进去就不再回到当前句区域）
         self.hearing = False
         self.status = "正在启动……"
 
@@ -230,14 +322,15 @@ class Overlay(QWidget):
 
         self._drag_from: QPoint | None = None
         self._timer = QTimer(self)
-        self._timer.timeout.connect(self.refresh)  # “等太久先显示”要看时间，所以定时检查；内容没变时什么也不做
+        self._timer.timeout.connect(self.refresh)  # “等太久就往下走”要看时间，所以定时检查；内容没变时什么也不做
         self._timer.start(50)
         self._restore_geometry()
 
     # ---- 数据更新（主线程） ----
 
     def set_live(self, pending: str, partial: str, translation: str = "") -> None:
-        """正在识别的文字不显示（会一小段一小段地闪），只用来点亮右上角的小圆点。"""
+        """正在识别的原文：显示在底部的当前句区域；投机译文不显示（它可能还会变）。"""
+        self.live = (pending, partial)
         hearing = bool(pending or partial)
         if hearing != self.hearing:
             self.hearing = hearing
@@ -255,48 +348,79 @@ class Overlay(QWidget):
             self._first_text_at.pop(old_id, None)
 
     def set_status(self, text: str) -> None:
-        self.status = text
+        if text != self.status:
+            self.status = text
+            self.update()
 
     def clear(self) -> None:
         self.units.clear()
         self._seen_at.clear()
         self._first_text_at.clear()
+        self._promoted = -1
 
     # ---- 显示什么 ----
 
-    def visible_units(self, moment: float | None = None) -> list[UnitSnapshot]:
-        """按顺序显示“准备好了”的单元：译文翻完了，或者等得太久了。
-        前一个还没准备好时，后面的也先不显示，这样新内容总是出现在最下面，已显示的位置不会被插队打乱。"""
-        moment = now() if moment is None else moment
-        shown = []
-        for unit in self.units.values():
-            first = self._first_text_at.get(unit.id)
-            ready = (
-                unit.done
-                or bool(unit.error)
-                or (first is not None and moment - first >= STREAM_FALLBACK_S)
-                or moment - self._seen_at.get(unit.id, moment) >= WAIT_FALLBACK_S
-            )
-            if not ready:
-                break
-            shown.append(unit)
-        return shown[-self.max_lines :]
+    def _ready(self, unit: UnitSnapshot, moment: float) -> bool:
+        """译文翻完了（或者等得太久了），这一对可以往下走。"""
+        first = self._first_text_at.get(unit.id)
+        return (
+            unit.done
+            or bool(unit.error)
+            or (first is not None and moment - first >= STREAM_FALLBACK_S)
+            or moment - self._seen_at.get(unit.id, moment) >= WAIT_FALLBACK_S
+        )
 
-    def blocks(self, moment: float | None = None) -> list[tuple[object, str]]:
-        zh = self.font_size
-        fr = max(11, round(zh * self.source_ratio))
-        shown = self.visible_units(moment)
-        blocks: list[tuple[object, str]] = [
-            (unit.id, pair_html(unit, len(shown) - 1 - index, zh, fr)) for index, unit in enumerate(shown)
-        ]
-        if self.status:
-            status = html.escape(self.status)
-            blocks.append(("status", f'<p style="margin:0; color:#ffd479; font-size:{fr}px;">{status}</p>'))
-        return blocks
+    def compose(self, moment: float | None = None) -> tuple[list[UnitSnapshot], tuple]:
+        """决定历史里放哪几对、当前句区域放什么。当前句区域的内容有三种：
+        - ("unit", 单元)：一句已经确认、正在翻译（译文位置留白）或刚翻好、下一句还没开始；
+        - ("live", 已确认的原文, 暂定的尾巴)：正在说的下一句；
+        - ("empty",)：什么都没有。
+        翻好的单元按顺序进入历史：前一句还没翻好时，后面的先不动，已显示的内容不会被插队打乱。"""
+        moment = now() if moment is None else moment
+        units = list(self.units.values())
+        ready: list[UnitSnapshot] = []
+        for unit in units:
+            if not self._ready(unit, moment):
+                break
+            ready.append(unit)
+        waiting = units[len(ready)] if len(ready) < len(units) else None
+        pending, partial = self.live
+        newest = ready[-1] if ready else None
+        # 翻好的最后一对留在当前句区域，直到下一句开始（出现暂定文字，或者下一句已经在翻）。
+        # 滑进历史是单向的：暂定文字常会短暂变空，如果那时让它退回当前句区域，就会上下来回跳
+        if newest is not None and (waiting is not None or pending or partial):
+            self._promoted = max(self._promoted, newest.id)
+        stay = newest is not None and newest.id > self._promoted
+        history = ready[:-1] if stay else ready
+        if waiting is not None:
+            slot = ("unit", waiting)
+        elif stay:
+            slot = ("unit", newest)
+        elif pending or partial:
+            slot = ("live", pending, partial)
+        else:
+            slot = ("empty",)
+        return history[-self.max_lines :], slot
 
     def refresh(self) -> None:
-        self.captions.gap = max(6, round(self.font_size * 0.4))
-        self.captions.set_blocks(self.blocks())
+        zh = self.font_size
+        fr = max(11, round(zh * self.source_ratio))
+        history, slot = self.compose()
+        # 当前句区域最亮，历史从次一级开始、越旧越暗。明暗只看新旧，不随当前句区域的状态变化，
+        # 否则当前句区域在“译文”和“暂定文字”之间切换时，整片历史会跟着变一次颜色
+        history_blocks = [
+            (unit.id, pair_html(unit, len(history) - index, zh, fr)) for index, unit in enumerate(history)
+        ]
+        if slot[0] == "unit":
+            fr_color, zh_color = AGE_COLORS[0]
+            slot_html = (source_html(slot[1].source, fr_color, fr), translation_html(slot[1], zh_color, zh))
+        elif slot[0] == "live":
+            slot_html = (live_html(slot[1], slot[2], fr), "")  # 译文的位置先留白
+        else:
+            slot_html = ("", "")
+        self.captions.gap = max(6, round(zh * 0.4))
+        self.captions.set_fonts(fr, zh)
+        self.captions.set_content(history_blocks, slot_html)
 
     # ---- 绘制 ----
 
@@ -309,6 +433,12 @@ class Overlay(QWidget):
         # 右上角的小圆点：听到有人说话时变绿
         painter.setBrush(QColor(92, 214, 128) if self.hearing else QColor(130, 130, 130, 150))
         painter.drawEllipse(QPointF(self.width() - 14, 12), 3.5, 3.5)
+        if self.status:  # 状态提示：左上角一行小字，不占字幕的位置
+            font = QFont()
+            font.setPixelSize(12)
+            painter.setFont(font)
+            painter.setPen(QColor("#ffd479"))
+            painter.drawText(QRect(20, 3, self.width() - 60, 16), Qt.AlignmentFlag.AlignLeft, self.status)
 
     def resizeEvent(self, event) -> None:
         # 手动摆放字幕区，不用布局管理器：布局会根据内容改窗口的最小尺寸，文字一多窗口就被撑大
@@ -372,7 +502,7 @@ class Overlay(QWidget):
             return
         screen = QGuiApplication.primaryScreen().availableGeometry()
         width = min(1100, int(screen.width() * 0.7))
-        height = round(self.font_size * 9)
+        height = round(self.font_size * 10)
         self.setGeometry(screen.center().x() - width // 2, screen.bottom() - height - 60, width, height)
 
     def save_settings(self) -> None:
