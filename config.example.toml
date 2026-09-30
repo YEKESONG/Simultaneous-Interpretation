@@ -13,16 +13,16 @@ speech_pad_ms = 200        # 句首往前多留一点音频，避免吞掉第一
 
 [asr]
 backend = "auto"           # auto：macOS 用 mlx，Windows 用 faster-whisper
-model = "mlx-community/whisper-large-v3-mlx"
+model = "mlx-community/whisper-large-v3-turbo"   # 实时同传用 turbo（音频文件转写仍只用完整版 large-v3）
 language = "fr"
 step_s = 0.6               # 说话期间每隔多久重新识别一次
 max_buffer_s = 12.0        # 识别缓冲区的上限，超过就强制切分
-quantize_bits = 4          # macOS：在内存里把同一个模型量化成 4 位，识别快约 25%（0 = 不量化）
+quantize_bits = 0          # macOS：在内存里量化成 8 或 4 位（0 = 不量化）；turbo 不需要
 # 以下只对 Windows 的 faster-whisper 后端有效
-faster_whisper_model = "large-v3"
+faster_whisper_model = "large-v3-turbo"
 device = "auto"            # auto / cuda / cpu
 compute_type = "default"   # 显卡上可用 float16；纯 CPU 可用 int8（large-v3 在 CPU 上基本做不到实时）
-allow_download = false     # 第一次使用要下载约 3 GB 的模型，确认后改成 true
+allow_download = false     # 第一次使用要下载约 1.6 GB 的模型，确认后改成 true
 
 [translate]
 # 任何兼容 OpenAI Chat Completions 接口的服务都可以，改 base_url / model / api_key_env / extra_body 即可。

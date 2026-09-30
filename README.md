@@ -14,7 +14,7 @@
 ```
 系统声音 ─► 语音检测 ─► 流式识别 ─► 按句切分 ─► 大模型翻译（流式）─► 透明字幕窗
    │           │            │                          │                  │
-   │       Silero VAD   Whisper large-v3        OpenAI 兼容 API        PySide6
+   │       Silero VAD   Whisper turbo           OpenAI 兼容 API        PySide6
    ├─ macOS：Core Audio Taps（自写的 Swift 小程序）
    └─ Windows：WASAPI loopback
 ```
@@ -35,6 +35,9 @@
 - [x] S7 透明悬浮字幕窗
 - [x] S8 Windows 支持（代码和自动测试已完成，未在 Windows 真机上验证）
 - [x] S9 延迟优化（测量工具、停顿时提前识别、量化选项、投机翻译）
+- [x] S10 真实内录端到端验证；全程序统一高精度时钟
+- [x] S11 默认 4 位量化；真实翻译 API 实测
+- [x] S12 实时识别改用 turbo（对比实验后由用户决定）
 
 ## 开发环境
 
@@ -64,7 +67,7 @@ python3 -m venv .venv
 
 ### Windows
 
-需要 Windows 10/11、Python 3.11 以上。强烈建议有 NVIDIA 显卡：large-v3 在纯 CPU 上基本做不到实时。
+需要 Windows 10/11、Python 3.11 以上。强烈建议有 NVIDIA 显卡：Whisper 在纯 CPU 上很难做到实时。
 
 ```powershell
 python -m venv .venv
@@ -72,7 +75,7 @@ python -m venv .venv
 ```
 
 - 内录用系统自带的 WASAPI loopback，不需要虚拟声卡，也不需要授权；戴耳机、用扬声器都照常能听到。
-- 识别用 faster-whisper（同一个 large-v3 模型的另一种格式）。第一次使用要下载约 3 GB 的模型：确认后在 `config.toml` 的 `[asr]` 里设 `allow_download = true`。
+- 识别用 faster-whisper（和 Mac 一样用 large-v3-turbo，只是格式不同）。第一次使用要下载约 1.6 GB 的模型：确认后在 `config.toml` 的 `[asr]` 里设 `allow_download = true`。
 - 显卡加速需要按 [faster-whisper 的说明](https://github.com/SYSTRAN/faster-whisper#gpu) 安装 NVIDIA 的 CUDA 库。
 - 切换输出设备（插耳机、连蓝牙）后，用悬浮窗右键菜单里的“重新连接音频设备”。
 - 状态：Windows 部分还没有在真机上运行过。GitHub Actions 会在 Windows 虚拟机上完整安装依赖、检查模块能否导入、跑逻辑测试。
@@ -101,17 +104,19 @@ python -m venv .venv
 .venv/bin/python -m simul_interp bench-asr samples/fr_meeting.wav   # 流式识别的延迟和准确率
 .venv/bin/python -m simul_interp bench-translate           # 翻译服务的首字延迟
 .venv/bin/python -m simul_interp bench-pipeline samples/fr_meeting.wav --mock-translate  # 端到端：说完到出现中文
-.venv/bin/python -m simul_interp --set asr.quantize_bits=4 bench-asr samples/fr_meeting.wav  # --set 临时改配置做对比
+.venv/bin/python -m simul_interp --set asr.quantize_bits=0 bench-asr samples/fr_meeting.wav  # --set 临时改配置做对比
+.venv/bin/python scripts/compare_models.py 录音.wav --configs 模型A:4,模型B:0  # 离线比较几种模型配置的准确率和速度
 ```
 
-目前的延迟（M5 MacBook Air，完整版 large-v3，法语合成语音；翻译用模拟服务，首字固定约 0.3 秒）：
-一句话说完后，**屏幕上开始出现中文的中位数约 1.0 秒**（90% 在 1.6 秒以内）。换成真实翻译 API 后还要加上它的首字延迟，可以用 `bench-translate` 实测。
+目前的延迟（M5 MacBook Air，Whisper turbo，法语合成语音，真实 DeepSeek API）：
+一句话说完后，**屏幕上开始出现中文的中位数约 0.9～1.0 秒**（90% 在 1.2 秒以内），连续说话时也不会越积越大。
+各种配置的对比数据见 [docs/DEVLOG.md](docs/DEVLOG.md) 的 S9～S12。
 
 ## 已知问题
 
 - 声音在半句话处突然停止（比如暂停视频）时，最后半句可能被识别模型“补全”错。
 - 投机翻译让翻译请求数约为正常的 3 倍；服务商有频率限制或在意费用时，用 `translate.speculative = false` 关掉。
-- 无风扇的 Mac 连续运行 large-v3 会发热降频，长时间使用延迟会变大；默认的 4 位量化（`asr.quantize_bits = 4`）能减轻这个问题。
+- 无风扇的 Mac 长时间满负荷识别会发热降频（实测约慢 40%），延迟会变大；实时识别默认用负载更低的 turbo 来减轻这个问题。
 - Windows 部分还没有在真机上运行过（CI 只保证能安装、能导入、逻辑测试通过）。
 
 ## 怎么通过这个仓库学习

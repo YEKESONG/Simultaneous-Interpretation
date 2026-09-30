@@ -31,14 +31,17 @@ class VadConfig:
 @dataclass
 class AsrConfig:
     backend: str = "auto"  # auto：macOS 用 mlx，Windows 用 faster-whisper
-    model: str = "mlx-community/whisper-large-v3-mlx"  # mlx 后端用的模型
-    faster_whisper_model: str = "large-v3"  # faster-whisper 后端用的模型（同一个模型的另一种格式）
+    # 实时同传用 turbo：解码器只有 4 层，比 large-v3 快 1.4~1.9 倍、芯片负载更低，
+    # 在真实会议录音上识别效果不比 large-v3 差（DEVLOG S12，用户 2026-10-01 决定）。
+    # 注意：音频文件转写任务按用户规定仍然只用完整版 mlx-community/whisper-large-v3-mlx
+    model: str = "mlx-community/whisper-large-v3-turbo"  # mlx 后端用的模型
+    faster_whisper_model: str = "large-v3-turbo"  # faster-whisper 后端用的模型（同一个模型的另一种格式）
     device: str = "auto"  # faster-whisper：auto / cuda / cpu
     compute_type: str = "default"  # faster-whisper：显卡上可用 float16，纯 CPU 可用 int8
-    allow_download: bool = False  # 本地没有模型时是否允许自动下载（large-v3 约 3 GB）
-    # mlx：在内存里把同一个模型的权重量化成 8 位或 4 位（0 = 不量化）。不下载任何东西；
-    # 实测识别快约 25%、测试音频文字一致（见 DEVLOG S9a），用户决定默认开启
-    quantize_bits: int = 4
+    allow_download: bool = False  # 本地没有模型时是否允许自动下载（turbo 约 1.6 GB，large-v3 约 3 GB）
+    # mlx：在内存里把权重量化成 8 位或 4 位（0 = 不量化），不下载任何东西。对 large-v3 能快 15~25%，
+    # 但 4 位在真实会议录音上和原始精度差异较大（DEVLOG S12）；turbo 本身够快，默认不量化
+    quantize_bits: int = 0
     language: str = "fr"
     step_s: float = 0.6  # 说话期间每隔多久重新识别一次
     max_buffer_s: float = 12.0  # 识别缓冲区的上限，超过就强制切分

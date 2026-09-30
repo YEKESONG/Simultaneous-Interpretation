@@ -20,7 +20,7 @@ def test_empty_file_keeps_defaults(tmp_path):
     path.write_text("", encoding="utf-8")
     cfg = load_config(path)
     assert cfg.asr.language == "fr"
-    assert cfg.asr.model == "mlx-community/whisper-large-v3-mlx"
+    assert cfg.asr.model == "mlx-community/whisper-large-v3-turbo"
 
 
 def test_toml_overrides_defaults(tmp_path):

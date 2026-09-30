@@ -45,9 +45,12 @@ def reference_words(backend: AsrBackend, path: Path, model_id: str) -> list[tupl
 
     cache = path.with_suffix(".ref.json")
     if cache.exists():
+        # 参照一旦生成就固定使用，不随被测模型重新计算：比较不同模型时要用同一把尺子。
+        # 想重新生成就删掉 .ref.json
         data = json.loads(cache.read_text(encoding="utf-8"))
-        if data.get("model") == model_id:
-            return [tuple(w) for w in data["words"]]
+        if data.get("model") != model_id:
+            print(f"（参照由 {data.get('model')} 生成，比较不同模型时沿用同一份参照）")
+        return [tuple(w) for w in data["words"]]
     segments = backend.transcribe(load_audio(path), word_timestamps=True)
     words = [w for segment in segments for w in segment.words]
     cache.write_text(json.dumps({"model": model_id, "words": words}, ensure_ascii=False), encoding="utf-8")
