@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.yekesong.si-audio-tap</string>
+	<key>CFBundleName</key>
+	<string>si-audio-tap</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>内录电脑正在播放的声音，用于实时语音识别和翻译。</string>
+</dict>
+</plist>

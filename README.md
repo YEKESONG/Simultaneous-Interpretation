@@ -22,7 +22,7 @@
 ## 进度
 
 - [x] S0 项目骨架与开发规范
-- [ ] S1 macOS 系统声音采集
+- [x] S1 macOS 系统声音采集
 - [ ] S2 音频文件模拟源与测试音频
 - [ ] S3 语音检测与分段
 - [ ] S4 Whisper 流式识别
@@ -47,6 +47,16 @@ python3 -m venv .venv
 ```bash
 .venv/bin/python -m simul_interp config
 ```
+
+### macOS 内录
+
+需要 macOS 14.2 以上和 Xcode 命令行工具（`xcode-select --install`）。第一次运行会自动编译 `bin/si-audio-tap`，并弹出“系统录音”权限框，点允许即可。
+
+```bash
+.venv/bin/python -m simul_interp record --seconds 10   # 录 10 秒系统声音，显示音量并保存 WAV
+```
+
+如果一直显示静音：打开 系统设置 → 隐私与安全性 → 屏幕与系统录音，在“仅系统录音”里打开 si-audio-tap。
 
 ## 怎么通过这个仓库学习
 
