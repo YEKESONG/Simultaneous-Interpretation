@@ -120,6 +120,12 @@ def cmd_bench_asr(args: argparse.Namespace) -> int:
     return bench_asr(load_config(args.config), args.file, speed=args.speed)
 
 
+def cmd_bench_translate(args: argparse.Namespace) -> int:
+    from .bench import bench_translate
+
+    return bench_translate(load_config(args.config), args.sentences)
+
+
 def add_source_args(p: argparse.ArgumentParser, default_speed: float | None = None) -> None:
     p.add_argument("--file", type=Path, default=None, help="用音频文件代替内录（任何 ffmpeg 支持的格式）")
     p.add_argument("--speed", type=float, default=default_speed, help="文件播放倍速：1 = 实时，0 = 尽快")
@@ -148,6 +154,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("file", type=Path, help="测试音频；同名 .txt 是标准答案（可选）")
     p.add_argument("--speed", type=float, default=1.0, help="播放倍速，默认 1 = 实时")
     p.set_defaults(func=cmd_bench_asr)
+
+    p = sub.add_parser("bench-translate", help="逐句实测翻译服务的首字延迟和整句完成时间")
+    p.add_argument("--sentences", type=Path, default=None, help="每行一句法语的文本文件，默认用内置的 5 句")
+    p.set_defaults(func=cmd_bench_translate)
     return parser
 
 

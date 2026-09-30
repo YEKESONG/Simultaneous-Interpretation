@@ -9,6 +9,7 @@ from __future__ import annotations
 import difflib
 import json
 import statistics
+import time
 from pathlib import Path
 
 from .asr.streaming import norm
@@ -58,6 +59,51 @@ def summarize(values: list[float]) -> str:
     values = sorted(values)
     p90 = values[min(len(values) - 1, int(0.9 * len(values)))]
     return f"中位数 {statistics.median(values):.2f}s，90% 在 {p90:.2f}s 以内，最慢 {values[-1]:.2f}s"
+
+
+SAMPLE_SENTENCES = [
+    "Bonjour à toutes et à tous, et merci d'être venus à cette réunion.",
+    "Les résultats sont encourageants : le taux d'erreur est passé de douze à sept pour cent.",
+    "Cependant, il reste plusieurs problèmes à résoudre, notamment la latence,",
+    "qui est encore trop élevée pour une utilisation en temps réel.",
+    "Est-ce que quelqu'un a des questions sur ce point ?",
+]
+
+
+def bench_translate(cfg: Config, sentences_file: Path | None = None) -> int:
+    """逐句实测翻译服务：首字延迟（发出请求 → 第一个字）和整句完成时间。"""
+    from collections import deque
+
+    from .translate import ChatTranslator
+
+    key = cfg.api_key()
+    if not key:
+        print(f"没有找到 API 密钥：请在 .env 里设置 {cfg.translate.api_key_env}")
+        return 1
+    sentences = SAMPLE_SENTENCES
+    if sentences_file:
+        sentences = [s for s in sentences_file.read_text(encoding="utf-8").splitlines() if s.strip()]
+    translator = ChatTranslator(cfg.translate, key)
+    translator.warm_up()
+    print(f"翻译服务：{cfg.translate.base_url}，模型 {cfg.translate.model}\n")
+    context: deque[str] = deque(maxlen=cfg.translate.context_sentences)
+    firsts, totals = [], []
+    for sentence in sentences:
+        started = time.monotonic()
+        first = None
+        output = ""
+        for delta in translator.stream(sentence, list(context)):
+            if first is None:
+                first = time.monotonic() - started
+            output += delta
+        total = time.monotonic() - started
+        firsts.append(first or total)
+        totals.append(total)
+        print(f"[首字 {firsts[-1]:.2f}s｜完成 {total:.2f}s] {sentence}\n    → {output.strip()}")
+        context.append(sentence)
+    translator.close()
+    print(f"\n首字延迟：{summarize(firsts)}\n整句完成：{summarize(totals)}")
+    return 0
 
 
 def bench_asr(cfg: Config, path: Path, speed: float = 1.0) -> int:

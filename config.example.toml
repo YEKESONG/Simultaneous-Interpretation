@@ -19,14 +19,22 @@ step_s = 0.6               # 说话期间每隔多久重新识别一次
 max_buffer_s = 12.0        # 识别缓冲区的上限，超过就强制切分
 
 [translate]
-# 任何兼容 OpenAI Chat Completions 接口的服务都可以，改 base_url / model / api_key_env 即可。
+# 任何兼容 OpenAI Chat Completions 接口的服务都可以，改 base_url / model / api_key_env / extra_body 即可。
 base_url = "https://api.deepseek.com"
-model = "deepseek-chat"
+model = "deepseek-flash"
 api_key_env = "DEEPSEEK_API_KEY"   # 密钥写在 .env 里，不要写在这里
 target_language = "简体中文"
 context_sentences = 3
 temperature = 0.2
+# DeepSeek 默认开启“思考模式”（先思考再输出，慢很多），同传必须关掉；换别的服务商时按它的文档改或删掉
+extra_body = { thinking = { type = "disabled" } }
 # glossary = { "IA" = "人工智能", "TP" = "实验课" }
+#
+# 例：本地 Ollama（不需要密钥，但要本机跑得动模型）
+# base_url = "http://localhost:11434/v1"
+# model = "你在 Ollama 里下载的模型名"
+# api_key_env = ""
+# extra_body = {}
 
 [ui]
 mode = "overlay"           # overlay = 透明悬浮窗；console = 只在终端输出

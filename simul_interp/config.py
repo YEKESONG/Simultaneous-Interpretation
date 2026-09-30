@@ -40,13 +40,14 @@ class AsrConfig:
 @dataclass
 class TranslateConfig:
     base_url: str = "https://api.deepseek.com"
-    model: str = "deepseek-chat"
+    model: str = "deepseek-flash"  # DeepSeek 目前最快的模型（2026-09 核对官方文档）
     api_key_env: str = "DEEPSEEK_API_KEY"  # 从哪个环境变量读 API 密钥
     target_language: str = "简体中文"
     context_sentences: int = 3  # 翻译时附带的上文句数
     temperature: float = 0.2
     glossary: dict[str, str] = field(default_factory=dict)  # 术语表：原文 → 译法
-    extra_body: dict = field(default_factory=dict)  # 某些服务商需要的额外参数
+    # 请求里额外附带的参数。DeepSeek 默认开启“思考模式”，会先思考再输出，同传必须关掉
+    extra_body: dict = field(default_factory=lambda: {"thinking": {"type": "disabled"}})
 
 
 @dataclass
@@ -73,6 +74,8 @@ class Config:
     transcript: TranscriptConfig = field(default_factory=TranscriptConfig)
 
     def api_key(self) -> str | None:
+        if not self.translate.api_key_env:  # 本地 Ollama 之类不需要密钥的服务
+            return "no-key-needed"
         return os.environ.get(self.translate.api_key_env) or None
 
     def transcript_dir(self) -> Path:
