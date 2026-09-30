@@ -5,6 +5,8 @@
 
 > 当前状态：开发中。每个阶段的进度见下方清单，详细过程见 [docs/DEVLOG.md](docs/DEVLOG.md)。
 
+![悬浮字幕窗效果（示例文字）](docs/overlay_preview.png)
+
 ## 工作原理
 
 ```
@@ -28,7 +30,7 @@
 - [x] S4 Whisper 流式识别
 - [x] S5 流式翻译
 - [x] S6 串起完整流程（终端版）
-- [ ] S7 透明悬浮字幕窗
+- [x] S7 透明悬浮字幕窗
 - [ ] S8 Windows 支持
 - [ ] S9 延迟优化
 
@@ -61,12 +63,19 @@ python3 -m venv .venv
 ## 使用
 
 ```bash
+.venv/bin/python -m simul_interp run                               # 内录系统声音，透明悬浮字幕窗
 .venv/bin/python -m simul_interp run --ui console                  # 内录系统声音，终端显示
 .venv/bin/python -m simul_interp run --ui console --file 录音.m4a  # 用音频文件模拟
 .venv/bin/python -m simul_interp run --ui console --mock-translate # 不联网的模拟翻译，测试用
 ```
 
 每次会话的原文和译文会保存为 Markdown，位置由 `config.toml` 的 `[transcript] dir` 决定。
+
+悬浮字幕窗的操作：
+- 拖动移动，右下角拖动调整大小；
+- 右键菜单：调字号、背景深浅、鼠标穿透（点击直接落到下面的窗口）、清空、退出；
+- 开启鼠标穿透后，用菜单栏的“译”字图标解锁或退出；
+- 位置、大小、字号、背景透明度会自动保存。
 
 测量工具：
 

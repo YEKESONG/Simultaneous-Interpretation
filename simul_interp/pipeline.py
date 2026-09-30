@@ -29,6 +29,9 @@ class View(Protocol):
     def on_unit(self, unit: TranslationUnit) -> None:
         """一段原文送去翻译（译文为空）、译文流式更新、翻译完成时都会调用。"""
 
+    def on_status(self, text: str) -> None:
+        """运行状态，比如“正在加载识别模型”；空字符串表示正常收听中。"""
+
 
 class Interpreter:
     def __init__(
@@ -79,15 +82,18 @@ class Interpreter:
 
     def run(self) -> None:
         """阻塞运行，直到音频源结束或 stop()；Ctrl+C 也会走到 finally 里把收尾做完。"""
-        if self.translator is not None:
-            self.translator.warm_up()
         try:
-            self.asr.run(self.source)
+            if self.translator is not None:
+                self.view.on_status("正在连接翻译服务……")
+                self.translator.warm_up()
+            self.view.on_status("正在加载识别模型……")
+            self.asr.run(self.source, on_started=lambda: self.view.on_status(""))
         finally:
             self.translation.close()
             if self.transcript is not None:
                 self.transcript.close()
                 logger.info("会话记录已保存：%s", self.transcript.path)
+            self.view.on_status("已结束")
 
     def stop(self) -> None:
         self.asr.stop()

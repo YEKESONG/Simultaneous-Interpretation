@@ -125,6 +125,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     options = dict(
         translate=not args.no_translate, mock_translate=args.mock_translate, save_transcript=not args.no_transcript
     )
+    if cfg.ui.mode == "overlay":
+        from .ui.overlay import run_overlay
+
+        return run_overlay(cfg, lambda view: Interpreter(cfg, view, **options))
     if cfg.ui.mode == "console":
         from .ui.console import ConsoleView
 

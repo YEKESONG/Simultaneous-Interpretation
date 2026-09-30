@@ -34,13 +34,17 @@ class AsrRunner:
     def stop(self) -> None:
         self._stop.set()
 
-    def run(self, source: AudioSource) -> None:
-        """阻塞运行，直到音频源结束或调用了 stop()。"""
+    def run(self, source: AudioSource, on_started: Callable[[], None] | None = None) -> None:
+        """阻塞运行，直到音频源结束或调用了 stop()。模型加载好、开始收听时调用 on_started。"""
         self.backend.load()
         transcriber = StreamingTranscriber(self.backend, max_buffer_s=self.cfg.asr.max_buffer_s)
+        if self._stop.is_set():
+            return
         source.start()
         listener = threading.Thread(target=self._listen, args=(source,), name="listen", daemon=True)
         listener.start()
+        if on_started is not None:
+            on_started()
         try:
             self._loop(transcriber)
         finally:

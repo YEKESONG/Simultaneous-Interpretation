@@ -25,6 +25,11 @@ class ConsoleView:
             self._pending, self._partial = pending, partial
             self._redraw()
 
+    def on_status(self, text: str) -> None:
+        if text:
+            with self._lock:
+                self._println(f"{GREY}{text}{RESET}")
+
     def on_unit(self, unit: TranslationUnit) -> None:
         with self._lock:
             if unit.id not in self._source_shown:
