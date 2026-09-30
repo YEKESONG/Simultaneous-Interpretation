@@ -1,0 +1,10 @@
+[project]
+name = "simul-interp"
+version = "0.1.0"
+description = "法语→中文实时同声传译：内录系统声音 + Whisper 流式识别 + 大模型翻译 + 透明字幕窗"
+requires-python = ">=3.11"
+readme = "README.md"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# 本机配置与密钥（从 *.example 复制后自己填写，不要提交）
+config.toml
+.env
+
+# 编译产物：macOS 录音辅助程序
+bin/
+native/macos/.build/
+
+# 音频与会话记录（可能含隐私内容，一律不提交）
+*.wav
+*.aiff
+*.mp3
+*.m4a
+*.ogg
+samples/
+transcripts/
+recordings/
+
+# 系统文件
+.DS_Store

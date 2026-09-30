@@ -1,0 +1,39 @@
+# 配置示例：复制为 config.toml 后按需修改（config.toml 不会提交到 git）。
+# 没写的项使用代码里的默认值，写错的项名会在启动时报错。
+
+[audio]
+source = "system"          # system = 电脑正在播放的声音；file = 用音频文件模拟（调试用）
+# file = "samples/fr_demo.wav"
+# file_speed = 1.0         # 文件模拟的播放倍速，1.0 = 实时
+
+[vad]
+threshold = 0.5            # 判定为“有人说话”的概率阈值
+min_silence_ms = 400       # 静音超过这么久，认为一句话说完
+speech_pad_ms = 200        # 句首往前多留一点音频，避免吞掉第一个音
+
+[asr]
+backend = "auto"           # auto：macOS 用 mlx，Windows 用 faster-whisper
+model = "mlx-community/whisper-large-v3-mlx"
+language = "fr"
+step_s = 0.6               # 说话期间每隔多久重新识别一次
+max_buffer_s = 12.0        # 识别缓冲区的上限，超过就强制切分
+
+[translate]
+# 任何兼容 OpenAI Chat Completions 接口的服务都可以，改 base_url / model / api_key_env 即可。
+base_url = "https://api.deepseek.com"
+model = "deepseek-chat"
+api_key_env = "DEEPSEEK_API_KEY"   # 密钥写在 .env 里，不要写在这里
+target_language = "简体中文"
+context_sentences = 3
+temperature = 0.2
+# glossary = { "IA" = "人工智能", "TP" = "实验课" }
+
+[ui]
+mode = "overlay"           # overlay = 透明悬浮窗；console = 只在终端输出
+font_size = 26
+opacity = 0.6
+max_lines = 3
+
+[transcript]
+enabled = true
+dir = "transcripts"        # 会话记录保存位置，可以写绝对路径
