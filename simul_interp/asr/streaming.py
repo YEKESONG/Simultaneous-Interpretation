@@ -28,7 +28,7 @@ from .types import AsrBackend, AsrUpdate, Segment
 
 _NON_WORD = re.compile(r"[^\w'’-]+")
 _SENTENCE_END = re.compile(r"[.?!…][\"'»”)]*$")
-MIN_UTTERANCE_S = 0.3  # 比这更短的“语音”多半是杂音，不识别
+MIN_UTTERANCE_S = 0.45  # 从开始（含 0.2 秒句首预留）到停止说话不足这么长的，多半是杂音，不识别
 HISTORY_WORDS = 200
 MAX_WORDS_PER_S = 6.0  # 正常法语语速约每秒 3 个词，快的也很少超过 5 个
 _CLAUSE_END = re.compile(r"[,;:.?!…][\"'»”)]*$")
@@ -120,6 +120,7 @@ class StreamingTranscriber:
 
     def _reset(self, start: float) -> None:
         self.buffer = np.zeros(0, dtype=np.float32)
+        self.utterance_start = start  # 这句话（含句首预留）开始的音频流时间
         self.buffer_start = start  # 缓冲区第一个采样点的音频流时间
         self.committed: list[str] = []  # 缓冲区里已确认（已发出去）的词，只追加，切缓冲区时移到 history
         self.tail: list[str] = []  # 上一次识别里还没确认的词
@@ -205,14 +206,18 @@ class StreamingTranscriber:
     def finish(self, speech_end: float) -> AsrUpdate:
         """VAD 判定一句说完：把剩下的全部确认，然后清空缓冲区。"""
         started = time.monotonic()
+        end = self.buffer_end
         words: list[str] = []
-        if self.buffer_s >= MIN_UTTERANCE_S:
+        if speech_end - self.utterance_start >= MIN_UTTERANCE_S:
             if self.last_pass_end >= speech_end + 0.1 and (self.tail or self.committed):
                 words = self.tail  # 上一次识别已经覆盖到说话结束，直接确认，省一次识别
             else:
+                # 句尾那段静音会诱发 Whisper “补”一句（典型的是 “Merci.”），这次识别不经过两次一致的检验，
+                # 所以先把缓冲区截到停止说话后 0.2 秒
+                keep = int(max(0.0, speech_end + 0.2 - self.buffer_start) * SAMPLE_RATE)
+                self.buffer = self.buffer[:keep]
                 _, hyp, _, _ = self._recognize()
                 words = hyp[self._covered(hyp) :]
-        end = self.buffer_end
         self.history = (self.history + self.committed + words)[-HISTORY_WORDS:]
         self._reset(end)
         return AsrUpdate(

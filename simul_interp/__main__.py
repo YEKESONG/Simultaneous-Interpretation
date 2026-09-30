@@ -114,6 +114,30 @@ def cmd_vad(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_run(args: argparse.Namespace) -> int:
+    """同传主程序。"""
+    from .pipeline import Interpreter
+
+    cfg = load_config(args.config)
+    apply_source_args(cfg, args)
+    if args.ui:
+        cfg.ui.mode = args.ui
+    options = dict(
+        translate=not args.no_translate, mock_translate=args.mock_translate, save_transcript=not args.no_transcript
+    )
+    if cfg.ui.mode == "console":
+        from .ui.console import ConsoleView
+
+        interpreter = Interpreter(cfg, ConsoleView(), **options)
+        print(f"输入：{interpreter.source.name}。按 Ctrl+C 结束。")
+        try:
+            interpreter.run()
+        except KeyboardInterrupt:
+            print("\n已停止")
+        return 0
+    raise SystemExit(f"未知的界面：{cfg.ui.mode}")
+
+
 def cmd_bench_asr(args: argparse.Namespace) -> int:
     from .bench import bench_asr
 
@@ -137,6 +161,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=Path, default=None, help="配置文件路径，默认读取项目根目录的 config.toml")
     parser.add_argument("-v", "--verbose", action="store_true", help="输出调试日志")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("run", help="开始同传（默认内录系统声音）")
+    add_source_args(p)
+    p.add_argument("--ui", choices=["overlay", "console"], default=None, help="界面：透明悬浮窗或终端，默认看配置")
+    p.add_argument("--no-translate", action="store_true", help="只识别不翻译")
+    p.add_argument("--mock-translate", action="store_true", help="用模拟翻译（不联网），测试流程和界面")
+    p.add_argument("--no-transcript", action="store_true", help="不保存会话记录")
+    p.set_defaults(func=cmd_run)
 
     p = sub.add_parser("config", help="打印生效的配置")
     p.set_defaults(func=cmd_config)

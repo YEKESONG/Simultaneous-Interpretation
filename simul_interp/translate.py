@@ -101,6 +101,25 @@ class ChatTranslator:
                     yield delta
 
 
+class MockTranslator:
+    """模拟翻译：不联网，逐字“流式”返回带标记的原文。用来在没有密钥时测试整条流程和界面。"""
+
+    def __init__(self, delay_s: float = 0.02) -> None:
+        self.delay_s = delay_s
+
+    def warm_up(self) -> None:
+        pass
+
+    def stream(self, source: str, context: list[str] | None = None) -> Iterator[str]:
+        time.sleep(0.3)  # 模拟网络和首字延迟
+        for char in f"〔模拟译文〕{source}":
+            time.sleep(self.delay_s)
+            yield char
+
+    def close(self) -> None:
+        pass
+
+
 class UnitBuilder:
     """决定什么时候把攒下的法语送去翻译：
     - 遇到句末标点（. ? !）就送；
@@ -149,7 +168,7 @@ class TranslationUnit:
 class TranslationStage:
     def __init__(
         self,
-        translator: ChatTranslator | None,
+        translator: ChatTranslator | MockTranslator | None,
         on_update: Callable[[TranslationUnit], None],
         context_sentences: int = 3,
         max_workers: int = 3,
@@ -162,6 +181,11 @@ class TranslationStage:
         self._next_id = 0
         self._lock = threading.Lock()
 
+    @property
+    def pending(self) -> str:
+        """已经确认、但还没凑够送去翻译的法语。"""
+        return " ".join(self.builder.pending)
+
     def feed(self, committed: str, final: bool) -> list[TranslationUnit]:
         """把新确认的法语交给翻译阶段，返回因此新建的翻译单元（此时译文还是空的）。"""
         units = []
@@ -172,9 +196,12 @@ class TranslationStage:
                 context = list(self._context)
                 self._context.append(source)
             units.append(unit)
+            if self.translator is None:  # 不翻译（没有密钥）：只有原文，直接算完成
+                unit.done_at = unit.ready_at
+                self.on_update(unit)
+                continue
             self.on_update(unit)
-            if self.translator is not None:
-                self._pool.submit(self._translate, unit, context)
+            self._pool.submit(self._translate, unit, context)
         return units
 
     def _translate(self, unit: TranslationUnit, context: list[str]) -> None:

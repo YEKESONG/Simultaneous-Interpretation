@@ -19,10 +19,11 @@ def timeline(text, word_s=0.3, gap_s=0.05):
 class FakeBackend:
     """按剧本“识别”：只返回缓冲区里已经完整听到的词；正说到一半的词被截成半个（模拟不稳定的尾巴）。"""
 
-    def __init__(self, words):
+    def __init__(self, words, hallucinate_on_silence=False):
         self.words = words
         self.calls = 0
         self.transcriber = None
+        self.hallucinate_on_silence = hallucinate_on_silence  # 模拟 Whisper 对着句尾静音“补”一句 Merci.
 
     def load(self):
         pass
@@ -39,6 +40,9 @@ class FakeBackend:
                 items.append((s - t0, e - t0, w))
             elif s < t1:
                 items.append((s - t0, t1 - t0, w[: max(1, len(w) // 2)]))
+        last_end = max((e for _, e, _ in self.words), default=0.0)
+        if self.hallucinate_on_silence and t1 - last_end > 0.3:
+            items.append((last_end - t0 + 0.05, t1 - t0, "Merci."))
         segments, current = [], []
         for item in items:
             current.append(item)
@@ -120,6 +124,28 @@ def test_finish_reuses_last_pass_when_it_covers_speech_end():
     final = t.finish(speech_end=words[-1][1])
     assert backend.calls == calls  # 没有再识别一次
     assert final.final and final.committed.endswith("tous.")
+
+
+def test_final_pass_ignores_trailing_silence():
+    words = timeline("Bonjour à tous.")
+    backend = FakeBackend(words, hallucinate_on_silence=True)
+    t = StreamingTranscriber(backend)
+    backend.transcriber = t
+    t.start_utterance(0.0)
+    feed(t, 1.0)  # 最后一个词还没说完
+    t.process()
+    feed(t, 0.7)  # 说完了，后面跟着 400 ms 以上的静音
+    final = t.finish(speech_end=words[-1][1])
+    assert "Merci" not in final.committed  # 截掉句尾静音后，最后一次识别不会“补”出 Merci.
+    assert final.committed.endswith("tous.")
+
+
+def test_too_short_utterance_is_ignored():
+    backend, t = make(timeline("Oui."))
+    t.start_utterance(0.0)
+    feed(t, 0.8)  # 缓冲区有 0.8 秒（含预留和静音），但真正说话只到 0.4 秒
+    final = t.finish(speech_end=0.4)
+    assert final.committed == "" and backend.calls == 0
 
 
 def test_force_trim_when_no_sentence_end():

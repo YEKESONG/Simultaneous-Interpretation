@@ -27,7 +27,7 @@
 - [x] S3 语音检测与分段
 - [x] S4 Whisper 流式识别
 - [x] S5 流式翻译
-- [ ] S6 串起完整流程（终端版）
+- [x] S6 串起完整流程（终端版）
 - [ ] S7 透明悬浮字幕窗
 - [ ] S8 Windows 支持
 - [ ] S9 延迟优化
@@ -57,6 +57,24 @@ python3 -m venv .venv
 ```
 
 如果一直显示静音：打开 系统设置 → 隐私与安全性 → 屏幕与系统录音，在“仅系统录音”里打开 si-audio-tap。
+
+## 使用
+
+```bash
+.venv/bin/python -m simul_interp run --ui console                  # 内录系统声音，终端显示
+.venv/bin/python -m simul_interp run --ui console --file 录音.m4a  # 用音频文件模拟
+.venv/bin/python -m simul_interp run --ui console --mock-translate # 不联网的模拟翻译，测试用
+```
+
+每次会话的原文和译文会保存为 Markdown，位置由 `config.toml` 的 `[transcript] dir` 决定。
+
+测量工具：
+
+```bash
+.venv/bin/python scripts/make_test_audio.py                # 生成法语测试音频（macOS 合成语音）
+.venv/bin/python -m simul_interp bench-asr samples/fr_meeting.wav   # 流式识别的延迟和准确率
+.venv/bin/python -m simul_interp bench-translate           # 翻译服务的首字延迟
+```
 
 ## 怎么通过这个仓库学习
 
