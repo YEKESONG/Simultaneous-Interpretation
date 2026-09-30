@@ -91,6 +91,7 @@ class Overlay(QWidget):
         self.opacity = float(self.settings.value("opacity", cfg.opacity))
         self.max_lines = cfg.max_lines
         self.click_through = False
+        self.on_reconnect = None  # 由 run_overlay 设置：重新连接音频设备
 
         self.units: OrderedDict[int, UnitSnapshot] = OrderedDict()
         self.pending = self.partial = ""
@@ -211,6 +212,8 @@ class Overlay(QWidget):
         through.toggled.connect(self.set_click_through)
         menu.addAction(through)
         menu.addAction("清空字幕", self.clear)
+        if self.on_reconnect is not None:
+            menu.addAction("重新连接音频设备（切换耳机后）", self.on_reconnect)
         menu.addSeparator()
         menu.addAction("退出", QApplication.instance().quit)
         return menu
@@ -328,6 +331,7 @@ def run_overlay(cfg, interpreter_factory) -> int:
     bridge.unit.connect(overlay.set_unit)
     bridge.status.connect(overlay.set_status)
     interpreter = interpreter_factory(QtView(bridge))
+    overlay.on_reconnect = interpreter.reconnect_audio
 
     def work() -> None:
         try:

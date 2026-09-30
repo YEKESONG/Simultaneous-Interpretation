@@ -48,6 +48,9 @@ class AudioSource:
     def stop(self) -> None:
         raise NotImplementedError
 
+    def reconnect(self) -> None:
+        """重新连接音频设备（切换输出设备之后）。默认什么也不做。"""
+
     def chunks(self) -> Iterator[AudioChunk]:
         """阻塞地逐块产出音频，音频源结束或 stop() 之后退出。"""
         while True:

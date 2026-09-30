@@ -1,5 +1,7 @@
 # Simultaneous-Interpretation · 法语 → 中文实时同传
 
+[![tests](https://github.com/YEKESONG/Simultaneous-Interpretation/actions/workflows/tests.yml/badge.svg)](https://github.com/YEKESONG/Simultaneous-Interpretation/actions/workflows/tests.yml)
+
 内录电脑正在播放的声音（视频会议、视频网站），实时识别法语并翻译成中文，在一个透明悬浮窗里同时显示原文和译文。
 内录不会影响你听原声：戴耳机或者用扬声器都照常能听到。
 
@@ -31,7 +33,7 @@
 - [x] S5 流式翻译
 - [x] S6 串起完整流程（终端版）
 - [x] S7 透明悬浮字幕窗
-- [ ] S8 Windows 支持
+- [x] S8 Windows 支持（代码和自动测试已完成，未在 Windows 真机上验证）
 - [ ] S9 延迟优化
 
 ## 开发环境
@@ -59,6 +61,21 @@ python3 -m venv .venv
 ```
 
 如果一直显示静音：打开 系统设置 → 隐私与安全性 → 屏幕与系统录音，在“仅系统录音”里打开 si-audio-tap。
+
+### Windows
+
+需要 Windows 10/11、Python 3.11 以上。强烈建议有 NVIDIA 显卡：large-v3 在纯 CPU 上基本做不到实时。
+
+```powershell
+python -m venv .venv
+.venv\Scripts\pip install -r requirements.txt
+```
+
+- 内录用系统自带的 WASAPI loopback，不需要虚拟声卡，也不需要授权；戴耳机、用扬声器都照常能听到。
+- 识别用 faster-whisper（同一个 large-v3 模型的另一种格式）。第一次使用要下载约 3 GB 的模型：确认后在 `config.toml` 的 `[asr]` 里设 `allow_download = true`。
+- 显卡加速需要按 [faster-whisper 的说明](https://github.com/SYSTRAN/faster-whisper#gpu) 安装 NVIDIA 的 CUDA 库。
+- 切换输出设备（插耳机、连蓝牙）后，用悬浮窗右键菜单里的“重新连接音频设备”。
+- 状态：Windows 部分还没有在真机上运行过。GitHub Actions 会在 Windows 虚拟机上完整安装依赖、检查模块能否导入、跑逻辑测试。
 
 ## 使用
 

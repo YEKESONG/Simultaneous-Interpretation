@@ -18,4 +18,14 @@ def create_backend(cfg: Config) -> AsrBackend:
         from .mlx_backend import MlxWhisperBackend
 
         return MlxWhisperBackend(cfg.asr.model, cfg.asr.language)
-    raise ValueError(f"未知的识别后端：{backend}")
+    if backend == "faster-whisper":
+        from .faster_whisper_backend import FasterWhisperBackend
+
+        return FasterWhisperBackend(
+            cfg.asr.faster_whisper_model,
+            cfg.asr.language,
+            device=cfg.asr.device,
+            compute_type=cfg.asr.compute_type,
+            allow_download=cfg.asr.allow_download,
+        )
+    raise ValueError(f"未知的识别后端：{backend}（可选 mlx / faster-whisper）")

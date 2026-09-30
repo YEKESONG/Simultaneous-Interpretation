@@ -198,6 +198,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if sys.platform == "win32":  # Windows 控制台被重定向时编码可能不是 UTF-8，打印中文会报错
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     args = build_parser().parse_args(argv)
     setup_logging(args.verbose)
     return args.func(args)

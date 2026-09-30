@@ -3,20 +3,13 @@
 from __future__ import annotations
 
 import logging
-import re
 
 import numpy as np
 
+from .common import HALLUCINATIONS, merge_word_pieces
 from .types import Segment
 
 logger = logging.getLogger(__name__)
-
-# Whisper 在静音、音乐上常见的“幻觉”：训练数据里的字幕署名，真人几乎不会说出口，出现就丢掉。
-# 注意不要过滤“abonnez-vous”“merci d'avoir regardé”这类视频里真的会说的话。
-HALLUCINATIONS = re.compile(
-    r"sous-titrage|sous-titres réalisés|sous-titres par|amara\.org|^\W*$",
-    re.IGNORECASE,
-)
 
 
 def resolve_local_model(repo_id: str) -> str:
@@ -74,19 +67,7 @@ class MlxWhisperBackend:
             text = s["text"].strip()
             if HALLUCINATIONS.search(text):
                 continue
-            segments.append(Segment(float(s["start"]), float(s["end"]), text, _merge_word_pieces(s.get("words", []))))
+            raw = [(w["start"], w["end"], w["word"]) for w in s.get("words", [])]
+            segments.append(Segment(float(s["start"]), float(s["end"]), text, merge_word_pieces(raw)))
         return segments
 
-
-def _merge_word_pieces(raw_words: list[dict]) -> list[tuple[float, float, str]]:
-    """Whisper 的逐词输出会把法语的省音和连字符拆开：d'être → “d” + “'être”，Est-ce → “Est” + “-ce”。
-    真正的新词都以空格开头，所以没有前导空格的片段并回前一个词，和 text.split() 的分词保持一致。"""
-    words: list[tuple[float, float, str]] = []
-    for w in raw_words:
-        raw = w["word"]
-        if words and not raw.startswith(" "):
-            start, _, text = words[-1]
-            words[-1] = (start, float(w["end"]), text + raw.strip())
-        else:
-            words.append((float(w["start"]), float(w["end"]), raw.strip()))
-    return words

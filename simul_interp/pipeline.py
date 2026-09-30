@@ -99,6 +99,14 @@ class Interpreter:
         self.asr.stop()
         self.source.stop()
 
+    def reconnect_audio(self) -> None:
+        """切换输出设备后重新连接（Windows 需要手动；macOS 本来就会自动重连）。"""
+        try:
+            self.source.reconnect()
+        except Exception as exc:
+            logger.error("重新连接音频设备失败：%s", exc)
+            self.view.on_status(f"重新连接音频设备失败：{exc}")
+
     def _on_asr(self, update: AsrUpdate) -> None:
         self.translation.feed(update.committed, update.final)
         self.view.on_live(self.translation.pending, update.partial)

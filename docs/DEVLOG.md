@@ -257,3 +257,31 @@ WER 里剩下的主要是数字写法（douze → 12、sept pour cent → 7%）�
 **验证**：pytest 共 33 个通过；预览图和真实运行截图显示正常（fr_meeting + 模拟翻译完整跑完并自动退出）。拖动、右键菜单、菜单栏图标、浮在全屏应用上这几项需要实际操作，还要用户在自己的屏幕上确认。
 
 **经验**：界面代码也可以测。把“渲染出什么内容”写成返回 HTML 字符串的纯函数，就能在没有屏幕的环境里断言；真实的视觉效果再用截图确认。
+
+---
+
+## S8 · Windows 支持（2026-09-30）
+
+**问题**：要在 Windows 上也能用，但开发机是 Mac，**没法在 Windows 真机上运行**。
+
+**做法**
+- **录音** `WindowsLoopbackSource`：用 PyAudioWPatch 调 WASAPI loopback，录默认扬声器声音的副本（不需要虚拟声卡，也不影响听原声）；设备原始格式通常是 48 kHz 双声道，混成单声道后用 soxr 流式重采样到 16 kHz。
+- **识别** `FasterWhisperBackend`：faster-whisper（CTranslate2），同一个 large-v3 模型的另一种格式，有 NVIDIA 显卡时用 CUDA。参数和 MLX 后端保持一致：贪心解码（默认的 `beam_size=5` 慢得多）、只用一个温度（默认会用 6 个温度重试）、限制生成 token 数。默认 `local_files_only=True` 不自动下载，要在配置里 `allow_download = true`。
+- 两个后端共用的“幻觉过滤”“合并被拆开的法语省音”提取到 `asr/common.py`。
+- 界面菜单新增“重新连接音频设备”：Windows 切换耳机后需要手动点；macOS 也支持（重启录音小程序），但它本来就会自动重连。
+
+**Windows 特有的两个坑（查文档和源码时发现的）**
+1. **WASAPI loopback 在没有声音播放时根本不回调**。如果不处理，语音检测永远等不到“静音”，最后一句话就一直不会结束，也不会送去翻译。解决：`GapFiller` 记录最后一次收到音频的时刻，超过 0.1 秒没有新数据，就按时间补静音。（macOS 的 Core Audio Tap 没有声音时会持续给全零，没有这个问题。）
+2. **PortAudio 只在初始化时枚举一次设备**，录音流开着的时候发现不了默认输出设备的变化。要自动跟随，需要另外调用 Windows 的 COM 接口，而这部分完全没法测试，所以这一版改成菜单里手动“重新连接”。
+
+**没有 Windows 真机，怎么尽量降低风险**
+- 读 PyAudioWPatch 的示例和源码、faster-whisper 的函数签名，确认接口和异常类型，不凭记忆写；
+- 把 Windows 特有的逻辑拆成纯函数（`GapFiller`）单独测试；faster-whisper 后端用一个假的 `faster_whisper` 模块测参数和结果转换；
+- 新增 GitHub Actions：每次推送都在 Linux、Windows、macOS 上跑单元测试；在 Windows 上**按 README 完整安装一遍依赖**，检查 Windows 专用模块能否导入、语音检测模型能否加载、命令行能否启动。
+- 另外处理了 Windows 控制台的两个小问题：输出重定向时编码可能不是 UTF-8（打印中文会报错）；旧版控制台默认不解析 ANSI 颜色码。
+
+**主要文件**：`simul_interp/audio/windows_loopback.py`、`simul_interp/asr/faster_whisper_backend.py`、`simul_interp/asr/common.py`、`.github/workflows/tests.yml`、`tests/test_windows.py`
+
+**验证**：新增 3 个测试，pytest 共 36 个通过。真实的 Windows 录音和识别还需要在 Windows 电脑上实际跑一次。
+
+**经验**：跨平台代码，“能在目标平台上安装和导入”是最低保证，CI 可以很便宜地做到；而“真的能录到声音、识别够快”必须在真机上验证。在 README 里明确写出哪些部分还没验证过。

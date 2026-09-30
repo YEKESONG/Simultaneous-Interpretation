@@ -31,7 +31,11 @@ class VadConfig:
 @dataclass
 class AsrConfig:
     backend: str = "auto"  # auto：macOS 用 mlx，Windows 用 faster-whisper
-    model: str = "mlx-community/whisper-large-v3-mlx"
+    model: str = "mlx-community/whisper-large-v3-mlx"  # mlx 后端用的模型
+    faster_whisper_model: str = "large-v3"  # faster-whisper 后端用的模型（同一个模型的另一种格式）
+    device: str = "auto"  # faster-whisper：auto / cuda / cpu
+    compute_type: str = "default"  # faster-whisper：显卡上可用 float16，纯 CPU 可用 int8
+    allow_download: bool = False  # 本地没有模型时是否允许自动下载（large-v3 约 3 GB）
     language: str = "fr"
     step_s: float = 0.6  # 说话期间每隔多久重新识别一次
     max_buffer_s: float = 12.0  # 识别缓冲区的上限，超过就强制切分

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 import threading
@@ -19,6 +20,8 @@ class ConsoleView:
         self._source_shown: set[int] = set()
         self._translation_shown: set[int] = set()
         self._tty = sys.stdout.isatty()
+        if sys.platform == "win32" and self._tty:
+            os.system("")  # 常用小技巧：让旧版 Windows 控制台开启 ANSI 颜色码（虚拟终端模式）
 
     def on_live(self, pending: str, partial: str) -> None:
         with self._lock:

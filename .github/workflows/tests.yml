@@ -1,0 +1,48 @@
+# 每次推送都在 Linux、Windows、macOS 上跑单元测试。
+# Windows 上额外按 README 的方法完整安装一遍依赖，检查 Windows 专用模块能否导入——
+# 开发机是 Mac，没法在真机上跑 Windows，这是最便宜的“至少能装上、能导入”的保证。
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Qt 在 Linux 上需要的系统库
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
+      - name: 安装测试所需的依赖（不装识别模型相关的大包）
+        run: python -m pip install numpy httpx PySide6-Essentials pytest
+      - name: 单元测试
+        run: python -m pytest
+        env:
+          QT_QPA_PLATFORM: offscreen
+
+  windows-install:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 按 README 完整安装依赖
+        run: python -m pip install -r requirements.txt
+      - name: Windows 专用模块能否导入
+        run: |
+          python -c "import pyaudiowpatch, soxr, faster_whisper; print('依赖导入成功')"
+          python -c "import simul_interp.audio.windows_loopback, simul_interp.asr.faster_whisper_backend; print('模块导入成功')"
+      - name: 语音检测模型能否加载（随 pip 包附带，不联网）
+        run: python -c "from simul_interp.vad import SileroVad; import numpy as np; print(SileroVad()(np.zeros(512, np.float32)))"
+      - name: 命令行能否启动
+        run: python -m simul_interp config

@@ -69,6 +69,7 @@ class MacSystemAudioSource(AudioSource):
         self._proc: subprocess.Popen | None = None
         self._thread: threading.Thread | None = None
         self._stop_requested = False
+        self._restart_requested = False
         self._started = threading.Event()
         self._heard_sound = False
         self._silent_samples = 0
@@ -88,6 +89,13 @@ class MacSystemAudioSource(AudioSource):
         if self._thread:
             self._thread.join(timeout=3.0)
 
+    def reconnect(self) -> None:
+        """手动重新连接：结束辅助程序，由后台线程立即重启（切换输出设备时它本来就会自动重启）。"""
+        proc = self._proc
+        if proc and proc.poll() is None:
+            self._restart_requested = True
+            proc.terminate()
+
     def _run(self, binary: Path) -> None:
         failures = 0
         try:
@@ -95,6 +103,10 @@ class MacSystemAudioSource(AudioSource):
                 code = self._run_helper_once(binary)
                 if self._stop_requested:
                     break
+                if self._restart_requested:
+                    self._restart_requested = False
+                    logger.info("重新连接音频设备")
+                    continue
                 if code == EXIT_OUTPUT_DEVICE_CHANGED:
                     logger.info("输出设备变了（插拔耳机或切换蓝牙），重新开始内录")
                     continue

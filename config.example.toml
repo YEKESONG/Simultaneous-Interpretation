@@ -17,6 +17,11 @@ model = "mlx-community/whisper-large-v3-mlx"
 language = "fr"
 step_s = 0.6               # 说话期间每隔多久重新识别一次
 max_buffer_s = 12.0        # 识别缓冲区的上限，超过就强制切分
+# 以下只对 Windows 的 faster-whisper 后端有效
+faster_whisper_model = "large-v3"
+device = "auto"            # auto / cuda / cpu
+compute_type = "default"   # 显卡上可用 float16；纯 CPU 可用 int8（large-v3 在 CPU 上基本做不到实时）
+allow_download = false     # 第一次使用要下载约 3 GB 的模型，确认后改成 true
 
 [translate]
 # 任何兼容 OpenAI Chat Completions 接口的服务都可以，改 base_url / model / api_key_env / extra_body 即可。

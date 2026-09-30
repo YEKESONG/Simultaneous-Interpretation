@@ -16,7 +16,11 @@ def create_source(cfg: Config) -> AudioSource:
             from .macos_tap import MacSystemAudioSource
 
             return MacSystemAudioSource()
-        raise RuntimeError(f"暂不支持在 {sys.platform} 上内录系统声音")
+        if sys.platform == "win32":
+            from .windows_loopback import WindowsLoopbackSource
+
+            return WindowsLoopbackSource()
+        raise RuntimeError(f"暂不支持在 {sys.platform} 上内录系统声音（只支持 macOS 和 Windows）")
     if cfg.audio.source == "file":
         from .file_source import FileAudioSource
 
