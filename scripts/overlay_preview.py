@@ -35,10 +35,10 @@ def main() -> int:
     app = QApplication(sys.argv)
     overlay = Overlay(UiConfig())
     overlay.font_size, overlay.opacity = 26, 0.6
-    overlay.resize(920, 250)
+    overlay.resize(920, 290)
     for unit in EXAMPLES:
         overlay.set_unit(unit)
-    overlay.set_live("Est-ce que quelqu'un a des", "questions sur ce")
+    overlay.set_live("Est-ce que quelqu'un a des", "questions sur ce point ?", "有人对这一点有疑问吗？")
     overlay.set_status("")
     overlay._render_if_dirty()
     shot = overlay.grab()  # Retina 屏上是 2 倍像素，画布也要按同样的缩放比例建

@@ -32,6 +32,8 @@ api_key_env = "DEEPSEEK_API_KEY"   # 密钥写在 .env 里，不要写在这里
 target_language = "简体中文"
 context_sentences = 3
 temperature = 0.2
+speculative = true           # 投机翻译：句子还没完全确认就先翻，中文早出现约 0.9 秒；代价是请求数约为 3 倍
+speculative_max_words = 12   # 凑成一句还要靠超过这么多个暂定词时不投机
 # DeepSeek 默认开启“思考模式”（先思考再输出，慢很多），同传必须关掉；换别的服务商时按它的文档改或删掉
 extra_body = { thinking = { type = "disabled" } }
 # glossary = { "IA" = "人工智能", "TP" = "实验课" }

@@ -49,7 +49,7 @@ class UnitSnapshot(NamedTuple):
 
 
 class Bridge(QObject):
-    live = Signal(str, str)
+    live = Signal(str, str, str)
     unit = Signal(object)
     status = Signal(str)
     finished = Signal()
@@ -61,8 +61,8 @@ class QtView:
     def __init__(self, bridge: Bridge) -> None:
         self.bridge = bridge
 
-    def on_live(self, pending: str, partial: str) -> None:
-        self.bridge.live.emit(pending, partial)
+    def on_live(self, pending: str, partial: str, translation: str = "") -> None:
+        self.bridge.live.emit(pending, partial, translation)
 
     def on_unit(self, unit: TranslationUnit) -> None:
         self.bridge.unit.emit(UnitSnapshot(unit.id, unit.source, unit.translation, unit.done, unit.error))
@@ -94,7 +94,7 @@ class Overlay(QWidget):
         self.on_reconnect = None  # 由 run_overlay 设置：重新连接音频设备
 
         self.units: OrderedDict[int, UnitSnapshot] = OrderedDict()
-        self.pending = self.partial = ""
+        self.pending = self.partial = self.live_translation = ""
         self.status = "正在启动……"
 
         self.label = QLabel(self)
@@ -122,8 +122,8 @@ class Overlay(QWidget):
 
     # ---- 数据更新（主线程） ----
 
-    def set_live(self, pending: str, partial: str) -> None:
-        self.pending, self.partial = pending, partial
+    def set_live(self, pending: str, partial: str, translation: str = "") -> None:
+        self.pending, self.partial, self.live_translation = pending, partial, translation
         self._dirty = True
 
     def set_unit(self, unit: UnitSnapshot) -> None:
@@ -138,7 +138,7 @@ class Overlay(QWidget):
 
     def clear(self) -> None:
         self.units.clear()
-        self.pending = self.partial = ""
+        self.pending = self.partial = self.live_translation = ""
         self._dirty = True
 
     # ---- 绘制 ----
@@ -167,6 +167,8 @@ class Overlay(QWidget):
                 f'<p style="margin:0; font-size:{fr}px; color:#e8e8e8;">▸ {esc(self.pending)} '
                 f'<span style="color:#9a9a9a;">{esc(self.partial)}</span></p>'
             )
+        if self.live_translation:  # 投机译文：原文还没完全确认，用浅蓝色，和已确认的白色译文区分开
+            parts.append(f'<p style="margin:0; color:#a9c7ff; font-size:{zh}px;">{esc(self.live_translation)}</p>')
         if self.status:
             parts.append(f'<p style="margin:0; font-size:{fr}px; color:#ffd479;">{esc(self.status)}</p>')
         if not parts:

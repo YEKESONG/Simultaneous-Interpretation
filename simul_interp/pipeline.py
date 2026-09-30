@@ -23,8 +23,9 @@ logger = logging.getLogger(__name__)
 
 
 class View(Protocol):
-    def on_live(self, pending: str, partial: str) -> None:
-        """正在说的话：pending = 已确认但还没送去翻译的法语，partial = 还没确认的暂定尾巴。"""
+    def on_live(self, pending: str, partial: str, translation: str = "") -> None:
+        """正在说的话：pending = 已确认但还没送去翻译的法语，partial = 还没确认的暂定尾巴，
+        translation = 这句的投机译文（还没确认，可能会变）。"""
 
     def on_unit(self, unit: TranslationUnit) -> None:
         """一段原文送去翻译（译文为空）、译文流式更新、翻译完成时都会调用。"""
@@ -56,7 +57,15 @@ class Interpreter:
                 self.translator = ChatTranslator(cfg.translate, key)
             else:
                 logger.warning("没有设置翻译 API 密钥（%s），只显示法语原文", cfg.translate.api_key_env)
-        self.translation = TranslationStage(self.translator, self._on_unit, cfg.translate.context_sentences)
+        self.translation = TranslationStage(
+            self.translator,
+            self._on_unit,
+            cfg.translate.context_sentences,
+            speculative=cfg.translate.speculative,
+            on_speculation=self._on_speculation,
+            max_speculative_words=cfg.translate.speculative_max_words,
+        )
+        self._live = ("", "")  # 最近一次的 (pending, partial)，投机译文更新时要一起重新显示
         self.asr = AsrRunner(cfg, self.backend, self._on_asr)
 
         self.transcript: TranscriptWriter | None = None
@@ -109,7 +118,13 @@ class Interpreter:
 
     def _on_asr(self, update: AsrUpdate) -> None:
         self.translation.feed(update.committed, update.final)
-        self.view.on_live(self.translation.pending, update.partial)
+        if not update.final:
+            self.translation.speculate(update.partial)
+        self._live = (self.translation.pending, update.partial)
+        self.view.on_live(*self._live, self.translation.speculative_translation)
+
+    def _on_speculation(self, text: str) -> None:
+        self.view.on_live(*self._live, text)
 
     def _on_unit(self, unit: TranslationUnit) -> None:
         self.view.on_unit(unit)

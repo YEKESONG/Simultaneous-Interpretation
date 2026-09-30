@@ -151,6 +151,12 @@ def cmd_bench_asr(args: argparse.Namespace) -> int:
     return bench_asr(get_config(args), args.file, speed=args.speed)
 
 
+def cmd_bench_pipeline(args: argparse.Namespace) -> int:
+    from .bench import bench_pipeline
+
+    return bench_pipeline(get_config(args), args.file, speed=args.speed, mock=args.mock_translate)
+
+
 def cmd_bench_translate(args: argparse.Namespace) -> int:
     from .bench import bench_translate
 
@@ -196,6 +202,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("file", type=Path, help="测试音频；同名 .txt 是标准答案（可选）")
     p.add_argument("--speed", type=float, default=1.0, help="播放倍速，默认 1 = 实时")
     p.set_defaults(func=cmd_bench_asr)
+
+    p = sub.add_parser("bench-pipeline", help="识别 + 翻译端到端：统计一句话说完到出现中文要多久")
+    p.add_argument("file", type=Path, help="测试音频")
+    p.add_argument("--speed", type=float, default=1.0, help="播放倍速，默认 1 = 实时")
+    p.add_argument("--mock-translate", action="store_true", help="用模拟翻译（不联网，首字固定约 0.3 秒）")
+    p.set_defaults(func=cmd_bench_pipeline)
 
     p = sub.add_parser("bench-translate", help="逐句实测翻译服务的首字延迟和整句完成时间")
     p.add_argument("--sentences", type=Path, default=None, help="每行一句法语的文本文件，默认用内置的 5 句")

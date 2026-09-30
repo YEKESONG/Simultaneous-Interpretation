@@ -52,6 +52,10 @@ class TranslateConfig:
     target_language: str = "简体中文"
     context_sentences: int = 3  # 翻译时附带的上文句数
     temperature: float = 0.2
+    # 投机翻译：句子最后几个词还没被“两次一致”确认时就先送去翻译，确认后文字没变就直接用，
+    # 中文能早出现约一次确认的时间；文字变了会重翻，所以偶尔多花一次 API 调用
+    speculative: bool = True
+    speculative_max_words: int = 12  # 凑成一句还要靠超过这么多个暂定词时不投机（暂定部分太长多半不可靠）
     glossary: dict[str, str] = field(default_factory=dict)  # 术语表：原文 → 译法
     # 请求里额外附带的参数。DeepSeek 默认开启“思考模式”，会先思考再输出，同传必须关掉
     extra_body: dict = field(default_factory=lambda: {"thinking": {"type": "disabled"}})

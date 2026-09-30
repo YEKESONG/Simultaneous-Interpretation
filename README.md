@@ -34,7 +34,7 @@
 - [x] S6 串起完整流程（终端版）
 - [x] S7 透明悬浮字幕窗
 - [x] S8 Windows 支持（代码和自动测试已完成，未在 Windows 真机上验证）
-- [ ] S9 延迟优化
+- [x] S9 延迟优化（测量工具、停顿时提前识别、量化选项、投机翻译）
 
 ## 开发环境
 
@@ -100,7 +100,12 @@ python -m venv .venv
 .venv/bin/python scripts/make_test_audio.py                # 生成法语测试音频（macOS 合成语音）
 .venv/bin/python -m simul_interp bench-asr samples/fr_meeting.wav   # 流式识别的延迟和准确率
 .venv/bin/python -m simul_interp bench-translate           # 翻译服务的首字延迟
+.venv/bin/python -m simul_interp bench-pipeline samples/fr_meeting.wav --mock-translate  # 端到端：说完到出现中文
+.venv/bin/python -m simul_interp --set asr.quantize_bits=4 bench-asr samples/fr_meeting.wav  # --set 临时改配置做对比
 ```
+
+目前的延迟（M5 MacBook Air，完整版 large-v3，法语合成语音；翻译用模拟服务，首字固定约 0.3 秒）：
+一句话说完后，**屏幕上开始出现中文的中位数约 1.0 秒**（90% 在 1.6 秒以内）。换成真实翻译 API 后还要加上它的首字延迟，可以用 `bench-translate` 实测。
 
 ## 怎么通过这个仓库学习
 

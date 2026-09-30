@@ -19,6 +19,7 @@ from dataclasses import dataclass
 
 import httpx
 
+from .asr.streaming import norm
 from .config import TranslateConfig
 
 logger = logging.getLogger(__name__)
@@ -132,22 +133,38 @@ class UnitBuilder:
         self.max_words = max_words
         self.pending: list[str] = []
 
+    def is_boundary(self, word: str, count: int) -> bool:
+        """攒到第 count 个词（就是 word）时，是否凑成了一个翻译单元。"""
+        return bool(
+            _SENTENCE_END.search(word)
+            or (_CLAUSE_END.search(word) and count >= self.clause_min_words)
+            or count >= self.max_words
+        )
+
     def add(self, committed: str, final: bool) -> list[str]:
         units = []
         for word in committed.split():
             self.pending.append(word)
-            count = len(self.pending)
-            if (
-                _SENTENCE_END.search(word)
-                or (_CLAUSE_END.search(word) and count >= self.clause_min_words)
-                or count >= self.max_words
-            ):
+            if self.is_boundary(word, len(self.pending)):
                 units.append(" ".join(self.pending))
                 self.pending = []
         if final and self.pending:
             units.append(" ".join(self.pending))
             self.pending = []
         return units
+
+    def first_unit(self, words: list[str]) -> int:
+        """把 words 当作从头开始攒的词，返回第一个翻译单元有几个词；凑不成返回 0。
+        投机翻译用它来切单元，保证和正式确认后的切法完全一样。"""
+        for index, word in enumerate(words):
+            if self.is_boundary(word, index + 1):
+                return index + 1
+        return 0
+
+
+def unit_key(text: str) -> tuple[str, ...]:
+    """比较两段原文是否“同一句”：忽略大小写和标点。"""
+    return tuple(norm(word) for word in text.split())
 
 
 @dataclass
@@ -156,13 +173,29 @@ class TranslationUnit:
     source: str
     ready_at: float  # 原文确认、送去翻译的 time.monotonic()
     translation: str = ""
-    first_token_at: float | None = None
+    first_token_at: float | None = None  # 投机翻译命中时可能早于 ready_at：原文还没确认，译文就已经开始出来了
     done_at: float | None = None
     error: str = ""
+    speculative: bool = False  # 译文是否来自投机翻译
 
     @property
     def done(self) -> bool:
         return self.done_at is not None
+
+
+@dataclass
+class SpeculativeJob:
+    """还没完全确认的一句，先送去翻译。确认后文字没变，就直接用这份译文，不再请求。"""
+
+    source: str
+    key: tuple[str, ...]
+    context: list[str]
+    translation: str = ""
+    first_token_at: float | None = None
+    done_at: float | None = None
+    error: str = ""
+    cancelled: bool = False
+    unit: TranslationUnit | None = None  # 被哪个正式单元采用了
 
 
 class TranslationStage:
@@ -171,14 +204,24 @@ class TranslationStage:
         translator: ChatTranslator | MockTranslator | None,
         on_update: Callable[[TranslationUnit], None],
         context_sentences: int = 3,
-        max_workers: int = 3,
+        max_workers: int = 4,
+        speculative: bool = False,
+        on_speculation: Callable[[str], None] | None = None,
+        max_speculative_words: int = 12,
     ) -> None:
+        """speculative：开启投机翻译；on_speculation(译文) 在投机译文更新时调用，用来显示在“正在说”那一行。
+        max_speculative_words：凑成单元还需要超过这么多个暂定词时不投机（暂定部分太长，多半不可靠）。"""
         self.translator = translator
         self.on_update = on_update
         self.builder = UnitBuilder()
+        self.speculative = speculative and translator is not None
+        self.on_speculation = on_speculation or (lambda text: None)
+        self.max_speculative_words = max_speculative_words
+        self.stats = {"speculated": 0, "adopted": 0}
         self._context: deque[str] = deque(maxlen=context_sentences)
         self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="translate")
         self._next_id = 0
+        self._spec: SpeculativeJob | None = None
         self._lock = threading.Lock()
 
     @property
@@ -186,8 +229,15 @@ class TranslationStage:
         """已经确认、但还没凑够送去翻译的法语。"""
         return " ".join(self.builder.pending)
 
+    @property
+    def speculative_translation(self) -> str:
+        """当前投机翻译的译文（还没被正式单元采用的），没有则为空。"""
+        with self._lock:
+            job = self._spec
+            return job.translation.strip() if job is not None and not job.cancelled else ""
+
     def feed(self, committed: str, final: bool) -> list[TranslationUnit]:
-        """把新确认的法语交给翻译阶段，返回因此新建的翻译单元（此时译文还是空的）。"""
+        """把新确认的法语交给翻译阶段，返回因此新建的翻译单元。"""
         units = []
         for source in self.builder.add(committed, final):
             with self._lock:
@@ -195,14 +245,89 @@ class TranslationStage:
                 self._next_id += 1
                 context = list(self._context)
                 self._context.append(source)
+                job = self._adopt_speculation(unit)
             units.append(unit)
             if self.translator is None:  # 不翻译（没有密钥）：只有原文，直接算完成
                 unit.done_at = unit.ready_at
                 self.on_update(unit)
                 continue
             self.on_update(unit)
-            self._pool.submit(self._translate, unit, context)
+            if job is None:
+                self._pool.submit(self._translate, unit, context)
         return units
+
+    def speculate(self, partial: str) -> None:
+        """在“已确认但还没送出的词 + 暂定尾巴”里找第一个翻译单元；找到就先送去翻译。"""
+        if not self.speculative:
+            return
+        pending = list(self.builder.pending)
+        words = pending + partial.split()
+        size = self.builder.first_unit(words)
+        if size <= len(pending) or size - len(pending) > self.max_speculative_words:
+            return
+        source = " ".join(words[:size])
+        key = unit_key(source)
+        with self._lock:
+            if self._spec is not None and self._spec.key == key:
+                return  # 这句已经在投机翻译了
+            if self._spec is not None:
+                self._spec.cancelled = True  # 暂定文字变了，之前那份投机作废
+            job = SpeculativeJob(source, key, list(self._context))
+            self._spec = job
+            self.stats["speculated"] += 1
+        self._pool.submit(self._run_speculation, job)
+
+    def _adopt_speculation(self, unit: TranslationUnit) -> SpeculativeJob | None:
+        """（持锁调用）正式单元确认时：和投机的是同一句就采用它的译文，否则让投机作废。"""
+        job, self._spec = self._spec, None
+        if job is None:
+            return None
+        if job.cancelled or job.key != unit_key(unit.source):
+            job.cancelled = True
+            return None
+        job.unit = unit
+        unit.speculative = True
+        unit.translation, unit.first_token_at, unit.error = job.translation, job.first_token_at, job.error
+        if job.done_at is not None:
+            unit.translation = unit.translation.strip()
+            unit.done_at = unit.ready_at  # 原文确认时译文已经翻完了
+        self.stats["adopted"] += 1
+        return job
+
+    def _run_speculation(self, job: SpeculativeJob) -> None:
+        stream = self.translator.stream(job.source, job.context)
+        try:
+            for delta in stream:
+                if job.cancelled:
+                    return  # 退出前 finally 会关掉生成器，也就关掉了 HTTP 流
+                with self._lock:
+                    job.translation += delta
+                    if job.first_token_at is None:
+                        job.first_token_at = time.monotonic()
+                    unit = job.unit
+                    if unit is not None:
+                        unit.translation = job.translation
+                        unit.first_token_at = unit.first_token_at or job.first_token_at
+                    text = job.translation.strip()
+                    still_live = unit is None and self._spec is job  # 还没被采用、也没被新的投机替换
+                if unit is not None:
+                    self.on_update(unit)
+                elif still_live:
+                    self.on_speculation(text)
+        except Exception as exc:
+            job.error = str(exc)
+            logger.warning("投机翻译失败：%s", exc)
+        finally:
+            stream.close()
+        with self._lock:
+            job.done_at = time.monotonic()
+            unit = job.unit
+            if unit is not None and not unit.done:
+                unit.translation = job.translation.strip()
+                unit.error = job.error
+                unit.done_at = job.done_at
+        if unit is not None:
+            self.on_update(unit)
 
     def _translate(self, unit: TranslationUnit, context: list[str]) -> None:
         try:
@@ -219,6 +344,9 @@ class TranslationStage:
         self.on_update(unit)
 
     def close(self) -> None:
+        with self._lock:
+            if self._spec is not None:
+                self._spec.cancelled = True
         self._pool.shutdown(wait=True)
         if self.translator is not None:
             self.translator.close()

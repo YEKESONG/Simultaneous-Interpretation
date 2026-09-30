@@ -9,6 +9,7 @@ from __future__ import annotations
 import difflib
 import json
 import statistics
+import threading
 import time
 from pathlib import Path
 
@@ -103,6 +104,79 @@ def bench_translate(cfg: Config, sentences_file: Path | None = None) -> int:
         context.append(sentence)
     translator.close()
     print(f"\n首字延迟：{summarize(firsts)}\n整句完成：{summarize(totals)}")
+    return 0
+
+
+class RecordingView:
+    """基准测试用的“界面”：记下每个翻译单元的最终状态，同时把译文打印出来。"""
+
+    def __init__(self) -> None:
+        self.units: dict = {}
+        self._printed: set[int] = set()
+        self._lock = threading.Lock()
+
+    def on_live(self, pending: str, partial: str, translation: str = "") -> None:
+        pass
+
+    def on_status(self, text: str) -> None:
+        if text:
+            print(f"{GREY}{text}{RESET}", flush=True)
+
+    def on_unit(self, unit) -> None:
+        with self._lock:
+            self.units[unit.id] = unit
+            if unit.done and unit.id not in self._printed:
+                self._printed.add(unit.id)
+                mark = "（投机命中）" if unit.speculative else ""
+                print(f"#{unit.id} {unit.source}\n    → {unit.translation or unit.error}{mark}", flush=True)
+
+
+def bench_pipeline(cfg: Config, path: Path, speed: float = 1.0, mock: bool = False) -> int:
+    """整条流水线（识别 + 翻译）按真实语速跑一遍，统计“一句话说完 → 屏幕上开始出现中文”要多久。"""
+    from .pipeline import Interpreter
+
+    if not mock and not cfg.api_key():
+        print(f"没有找到 API 密钥（{cfg.translate.api_key_env}）；可以加 --mock-translate 用模拟翻译")
+        return 1
+    cfg.audio.source, cfg.audio.file, cfg.audio.file_speed = "file", str(path), speed
+    view = RecordingView()
+    interpreter = Interpreter(cfg, view, mock_translate=mock, save_transcript=False)
+    interpreter.backend.load()  # 和流水线里的识别在同一个线程（MLX 的要求）
+    ref = reference_words(interpreter.backend, path, cfg.asr.model)
+    ref_text = [w for _, _, w in ref]
+    translator = "模拟翻译（首字固定约 0.3 s）" if mock else f"{cfg.translate.model}"
+    print(f"端到端测试 {path.name}：翻译 {translator}，投机翻译{'开' if cfg.translate.speculative else '关'}\n")
+    interpreter.run()
+
+    # 每个翻译单元的最后一个词，对应参照里的哪个词、在音频里什么时候说完
+    units = [view.units[i] for i in sorted(view.units)]
+    words, owner = [], []
+    for unit in units:
+        for word in unit.source.split():
+            words.append(word)
+            owner.append(unit.id)
+    last_ref: dict[int, int] = {}
+    for ref_index, word_index in matched_indices(ref_text, words):
+        last_ref[owner[word_index]] = max(last_ref.get(owner[word_index], -1), ref_index)
+    started = interpreter.source.started_at
+    confirmed, first_zh, done_zh = [], [], []
+    for unit in units:
+        if unit.id not in last_ref:
+            continue
+        spoken = started + ref[last_ref[unit.id]][1] / speed
+        confirmed.append(unit.ready_at - spoken)
+        if unit.first_token_at is not None:
+            first_zh.append(unit.first_token_at - spoken)
+        if unit.done_at is not None:
+            done_zh.append(unit.done_at - spoken)
+
+    stats = interpreter.translation.stats
+    print("\n==== 结果（从这段话的最后一个词说完算起）====")
+    print(f"原文确认、送去翻译：{summarize(confirmed)}")
+    print(f"屏幕上开始出现中文：{summarize(first_zh)}")
+    print(f"中文全部译完：{summarize(done_zh)}")
+    if cfg.translate.speculative:
+        print(f"投机翻译：发起 {stats['speculated']} 次，命中 {stats['adopted']} 次（共 {len(units)} 段）")
     return 0
 
 
