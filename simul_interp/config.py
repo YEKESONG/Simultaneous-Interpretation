@@ -36,6 +36,9 @@ class AsrConfig:
     device: str = "auto"  # faster-whisper：auto / cuda / cpu
     compute_type: str = "default"  # faster-whisper：显卡上可用 float16，纯 CPU 可用 int8
     allow_download: bool = False  # 本地没有模型时是否允许自动下载（large-v3 约 3 GB）
+    # mlx：在内存里把同一个模型的权重量化成 8 位或 4 位（0 = 不量化）。识别更快，不下载任何东西，
+    # 但数值精度略有变化，开启前先用 bench-asr 对比准确率
+    quantize_bits: int = 0
     language: str = "fr"
     step_s: float = 0.6  # 说话期间每隔多久重新识别一次
     max_buffer_s: float = 12.0  # 识别缓冲区的上限，超过就强制切分
@@ -105,6 +108,24 @@ def load_dotenv(path: Path) -> None:
         key, value = line.split("=", 1)
         key, value = key.strip(), value.strip().strip('"').strip("'")
         os.environ.setdefault(key, value)
+
+
+def apply_overrides(cfg: Config, overrides: list[str]) -> None:
+    """命令行上的 --set 段.项=值，按原来的类型转换，比如 asr.step_s=1.0、vad.min_silence_ms=300。"""
+    for item in overrides:
+        key, sep, raw = item.partition("=")
+        section_name, _, name = key.strip().partition(".")
+        section = getattr(cfg, section_name, None)
+        if not sep or section is None or name not in {f.name for f in fields(section)}:
+            raise ValueError(f"--set {item}：格式是 段.项=值，例如 asr.step_s=1.0")
+        current = getattr(section, name)
+        if isinstance(current, bool):
+            value = raw.strip().lower() in ("1", "true", "yes", "on")
+        elif isinstance(current, (int, float, str)):
+            value = type(current)(raw.strip())
+        else:
+            raise ValueError(f"--set 不支持修改 {key}，请写在 config.toml 里")
+        setattr(section, name, value)
 
 
 def load_config(path: Path | None = None) -> Config:

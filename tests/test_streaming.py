@@ -66,8 +66,9 @@ def make(words, **kwargs):
     return backend, transcriber
 
 
-def feed(transcriber, seconds):
-    transcriber.add_audio(np.zeros(int(seconds * SAMPLE_RATE), dtype=np.float32))
+def feed(transcriber, seconds, speech=True):
+    """喂一段音频；speech 表示 VAD 是否认为这段真的有人在说话。"""
+    transcriber.add_audio(np.zeros(int(seconds * SAMPLE_RATE), dtype=np.float32), speech=speech)
 
 
 def test_align_prefix_tolerates_small_changes():
@@ -111,6 +112,26 @@ def test_no_final_pass_on_silence_after_sentence_trim():
     # VAD 判定说完时，上一次识别（1.96 秒）没有覆盖到“说完 + 0.1 秒”，以前会对着剩下的静音再识别一次
     final = t.finish(speech_end=words[-1][1])
     assert final.committed == "" and backend.calls == calls  # 现在不再识别，也就不会“补”出 Merci.
+
+
+def test_no_pass_and_no_commit_on_silence_after_sentence_trim():
+    """实测问题：整句确认、在句末切过缓冲区后，停顿触发的一次识别对着静音幻觉出 “chaîne.”，
+    说完时又被当成“上一次识别已覆盖”直接确认了。"""
+    words = timeline("Bonjour à tous.")
+    backend = FakeBackend(words, hallucinate_on_silence=True)
+    t = StreamingTranscriber(backend)
+    backend.transcriber = t
+    t.start_utterance(0.0)
+    # “tous.” 在 1.2 秒说完；VAD 的说话标记到 1.22 秒为止，之后是停顿
+    for until, speech in ((0.6, True), (1.0, True), (1.22, True), (1.3, False)):
+        feed(t, until - t.buffer_end, speech=speech)
+        t.process()
+    assert t.buffer_start > 1.1  # “tous.” 两次一致被确认，缓冲区在句末切过
+    feed(t, 0.4, speech=False)  # 停顿继续，缓冲区够长了，停顿事件会要求马上识别一次
+    calls = backend.calls
+    assert t.process() is None and backend.calls == calls  # 缓冲区里没有新的说话：不识别
+    final = t.finish(speech_end=1.22)
+    assert final.committed == ""  # 也不会把幻觉当成尾巴确认
 
 
 def test_word_is_committed_only_after_two_agreeing_passes():

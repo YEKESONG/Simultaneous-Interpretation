@@ -12,7 +12,19 @@ from pathlib import Path
 import numpy as np
 
 from . import __version__
-from .config import ROOT, load_config
+from .config import ROOT, Config, apply_overrides, load_config
+
+
+def get_config(args: argparse.Namespace) -> Config:
+    """读配置文件，再用命令行覆盖：--set 段.项=值；--file 改用音频文件作为输入，--speed 控制播放倍速。"""
+    cfg = load_config(args.config)
+    apply_overrides(cfg, args.set)
+    if getattr(args, "file", None):
+        cfg.audio.source = "file"
+        cfg.audio.file = str(args.file)
+    if getattr(args, "speed", None) is not None:
+        cfg.audio.file_speed = args.speed
+    return cfg
 
 
 def setup_logging(verbose: bool) -> None:
@@ -24,7 +36,7 @@ def setup_logging(verbose: bool) -> None:
 
 
 def cmd_config(args: argparse.Namespace) -> int:
-    cfg = load_config(args.config)
+    cfg = get_config(args)
     print(json.dumps(cfg.to_dict(), ensure_ascii=False, indent=2))
     print(f"\nAPI 密钥（{cfg.translate.api_key_env}）：{'已设置' if cfg.api_key() else '未设置'}")
     return 0
@@ -35,7 +47,7 @@ def cmd_record(args: argparse.Namespace) -> int:
     from .audio import SAMPLE_RATE, create_source
     from .audio.util import meter, rms_dbfs, write_wav
 
-    cfg = load_config(args.config)
+    cfg = get_config(args)
     out = args.out or ROOT / "recordings" / f"system_{time.strftime('%Y%m%d_%H%M%S')}.wav"
     out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -69,13 +81,6 @@ def cmd_record(args: argparse.Namespace) -> int:
     return 0
 
 
-def apply_source_args(cfg, args: argparse.Namespace) -> None:
-    """--file 让任何命令改用音频文件作为输入，--speed 控制播放倍速。"""
-    if getattr(args, "file", None):
-        cfg.audio.source = "file"
-        cfg.audio.file = str(args.file)
-    if getattr(args, "speed", None) is not None:
-        cfg.audio.file_speed = args.speed
 
 
 def cmd_vad(args: argparse.Namespace) -> int:
@@ -83,8 +88,7 @@ def cmd_vad(args: argparse.Namespace) -> int:
     from .audio import create_source
     from .vad import SileroVad, VadSegmenter
 
-    cfg = load_config(args.config)
-    apply_source_args(cfg, args)
+    cfg = get_config(args)
     source = create_source(cfg)
     vad = SileroVad()
     segmenter = VadSegmenter(cfg.vad.threshold, cfg.vad.min_silence_ms, cfg.vad.speech_pad_ms)
@@ -118,8 +122,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     """同传主程序。"""
     from .pipeline import Interpreter
 
-    cfg = load_config(args.config)
-    apply_source_args(cfg, args)
+    cfg = get_config(args)
     if args.ui:
         cfg.ui.mode = args.ui
     options = dict(
@@ -145,13 +148,13 @@ def cmd_run(args: argparse.Namespace) -> int:
 def cmd_bench_asr(args: argparse.Namespace) -> int:
     from .bench import bench_asr
 
-    return bench_asr(load_config(args.config), args.file, speed=args.speed)
+    return bench_asr(get_config(args), args.file, speed=args.speed)
 
 
 def cmd_bench_translate(args: argparse.Namespace) -> int:
     from .bench import bench_translate
 
-    return bench_translate(load_config(args.config), args.sentences)
+    return bench_translate(get_config(args), args.sentences)
 
 
 def add_source_args(p: argparse.ArgumentParser, default_speed: float | None = None) -> None:
@@ -164,6 +167,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=__version__)
     parser.add_argument("--config", type=Path, default=None, help="配置文件路径，默认读取项目根目录的 config.toml")
     parser.add_argument("-v", "--verbose", action="store_true", help="输出调试日志")
+    parser.add_argument(
+        "--set", action="append", default=[], metavar="段.项=值", help="临时覆盖配置，可重复，例如 --set asr.step_s=1.0"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("run", help="开始同传（默认内录系统声音）")

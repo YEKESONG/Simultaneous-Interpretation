@@ -128,8 +128,12 @@ def bench_asr(cfg: Config, path: Path, speed: float = 1.0) -> int:
         mark = "■" if update.final else "·"
         print(f"[{at:6.2f}s] {mark} {update.committed} {GREY}{update.partial}{RESET}  ({update.compute_s:.2f}s)", flush=True)
 
-    print(f"开始流式识别 {path.name}（{speed:g} 倍速）……\n")
+    print(
+        f"开始流式识别 {path.name}（{speed:g} 倍速；量化 {cfg.asr.quantize_bits or '无'}，"
+        f"识别间隔 {cfg.asr.step_s}s，静音 {cfg.vad.min_silence_ms}ms 判定说完）……\n"
+    )
     AsrRunner(cfg, backend, on_update).run(source)
+    duration = updates[-1].audio_end if updates else 0.0
 
     # 每个参照词：第一次显示的时刻、被确认的时刻
     committed: list[str] = []
@@ -158,6 +162,9 @@ def bench_asr(cfg: Config, path: Path, speed: float = 1.0) -> int:
 
     print("\n==== 结果 ====")
     print(f"识别次数：{len(passes)}，每次平均 {statistics.mean(passes):.2f}s，最慢 {max(passes):.2f}s" if passes else "识别次数：0")
+    busy = sum(u.compute_s for u in updates)
+    if duration:
+        print(f"识别占用：{busy:.0f}s / {duration:.0f}s 音频（{busy / duration:.0%}，越高芯片越热）")
     print(f"显示延迟（词说完 → 第一次出现在屏幕上）：{summarize(shown_delay)}")
     print(f"确认延迟（词说完 → 确认，可以送去翻译）：{summarize(list(commit_delay.values()))}")
     print(f"句末延迟（句子最后一个词说完 → 整句确认）：{summarize(sentence_delay)}")

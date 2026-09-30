@@ -17,7 +17,7 @@ def create_backend(cfg: Config) -> AsrBackend:
     if backend == "mlx":
         from .mlx_backend import MlxWhisperBackend
 
-        return MlxWhisperBackend(cfg.asr.model, cfg.asr.language)
+        return MlxWhisperBackend(cfg.asr.model, cfg.asr.language, quantize_bits=cfg.asr.quantize_bits)
     if backend == "faster-whisper":
         from .faster_whisper_backend import FasterWhisperBackend
 

@@ -31,9 +31,10 @@ def resolve_local_model(repo_id: str) -> str:
 
 
 class MlxWhisperBackend:
-    def __init__(self, model: str, language: str) -> None:
+    def __init__(self, model: str, language: str, quantize_bits: int = 0) -> None:
         self.model_id = model
         self.language = language
+        self.quantize_bits = quantize_bits
         self._path: str | None = None
         self._transcribe = None
 
@@ -45,7 +46,23 @@ class MlxWhisperBackend:
         self._path = resolve_local_model(self.model_id)  # 传本地路径给 mlx_whisper，它就不会再联网检查
         self._transcribe = mlx_whisper.transcribe
         logger.info("加载识别模型 %s ……", self.model_id)
+        if self.quantize_bits:
+            self._quantize()
         self.transcribe(np.zeros(16000, dtype=np.float32))  # 预热：加载权重、编译 GPU 内核
+
+    def _quantize(self) -> None:
+        """在内存里把权重量化成 8 位或 4 位：还是同一个模型，不下载任何东西。
+        解码器生成每个 token 都要把全部权重读一遍，速度卡在内存带宽上，权重变小就更快。"""
+        import mlx.core as mx
+        import mlx.nn as nn
+        from mlx_whisper.load_models import load_model
+        from mlx_whisper.transcribe import ModelHolder
+
+        model = load_model(self._path, dtype=mx.float16)
+        nn.quantize(model, group_size=64, bits=self.quantize_bits)
+        # mlx_whisper 按路径缓存模型（ModelHolder）：把量化后的模型放进缓存，transcribe 就会直接用它
+        ModelHolder.model, ModelHolder.model_path = model, self._path
+        logger.info("已在内存中把识别模型量化为 %d 位", self.quantize_bits)
 
     def transcribe(
         self, audio: np.ndarray, prompt: str = "", word_timestamps: bool = False, max_tokens: int | None = None

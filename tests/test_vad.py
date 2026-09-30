@@ -16,7 +16,7 @@ def run(probs, **kwargs):
 
 
 def kinds(events):
-    return [e.type for e in events if e.type != "audio"]
+    return [e.type for e in events if e.type in ("start", "end")]
 
 
 def test_start_with_preroll_and_end_after_min_silence():
@@ -45,6 +45,15 @@ def test_hysteresis_keeps_speech_between_thresholds():
     events, _ = run(probs, threshold=0.5, min_silence_ms=400)
     end = next(e for e in events if e.type == "end")
     assert end.time > 35 * DT
+
+
+def test_pause_event_comes_before_end_once_per_pause():
+    probs = [0.9] * 10 + [0.0] * 5 + [0.9] * 10 + [0.0] * 20  # 一次短停顿（160 ms），一次说完
+    events, _ = run(probs, min_silence_ms=400, pause_ms=128)
+    types = [e.type for e in events if e.type != "audio"]
+    assert types == ["start", "pause", "pause", "end"]  # 短停顿和最后的停顿开头各发一次
+    first_pause = next(e for e in events if e.type == "pause")
+    assert abs(first_pause.time - (10 + 4) * DT) < 1e-9  # 静音 4 块（128 ms）时发出
 
 
 def test_flush_closes_open_utterance():

@@ -69,6 +69,7 @@ class AsrRunner:
 
     def _loop(self, transcriber: StreamingTranscriber) -> None:
         in_speech = False
+        paused = False  # 刚出现短停顿：不等固定间隔，马上识别一次
         while not self._stop.is_set():
             batch = [self._events.get()]
             while True:
@@ -83,11 +84,16 @@ class AsrRunner:
                     transcriber.start_utterance(event.time)
                     in_speech = True
                 elif event.type == "audio":
-                    transcriber.add_audio(event.chunk.samples)
+                    transcriber.add_audio(event.chunk.samples, speech=event.speech)
+                elif event.type == "pause":
+                    paused = True
                 elif event.type == "end":
-                    in_speech = False
+                    in_speech = paused = False
                     self.on_update(transcriber.finish(event.speech_end))
-            if in_speech and transcriber.new_audio_s >= self.cfg.asr.step_s:
+            # 停顿时马上识别一次：如果真是说完了，等 VAD 判定结束时，这次结果已经覆盖整句，可以直接确认
+            due = transcriber.new_audio_s >= self.cfg.asr.step_s or (paused and transcriber.new_audio_s >= 0.1)
+            if in_speech and due:
+                paused = False
                 update = transcriber.process()
                 if update is not None:
                     self.on_update(update)

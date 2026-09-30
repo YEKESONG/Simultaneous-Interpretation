@@ -2,7 +2,17 @@ import os
 
 import pytest
 
-from simul_interp.config import load_config, load_dotenv
+from simul_interp.config import Config, apply_overrides, load_config, load_dotenv
+
+
+def test_command_line_overrides_keep_types():
+    cfg = Config()
+    apply_overrides(cfg, ["asr.step_s=1.0", "vad.min_silence_ms=300", "asr.allow_download=true", "asr.language=en"])
+    assert cfg.asr.step_s == 1.0 and cfg.vad.min_silence_ms == 300
+    assert cfg.asr.allow_download is True and cfg.asr.language == "en"
+    for bad in ["asr.nope=1", "asr.step_s", "translate.glossary=x"]:
+        with pytest.raises(ValueError):
+            apply_overrides(cfg, [bad])
 
 
 def test_empty_file_keeps_defaults(tmp_path):

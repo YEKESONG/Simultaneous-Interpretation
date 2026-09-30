@@ -44,18 +44,23 @@ class SileroVad:
 
 @dataclass
 class VadEvent:
-    type: Literal["start", "audio", "end"]
+    type: Literal["start", "audio", "pause", "end"]  # pause：说话中刚出现一个短停顿（还不确定是不是说完了）
     time: float  # 音频流时间（秒）；end 事件是“判定说完”的时刻
     chunk: AudioChunk | None = None  # 只有 audio 事件带音频
     speech_end: float = 0.0  # 只有 end 事件有：真正停止说话的时刻（= time 减去那段静音）
+    speech: bool = False  # 只有 audio 事件有：这一块是不是真的有人在说话（句首预留和句中的静音都是 False）
 
 
 class VadSegmenter:
-    def __init__(self, threshold: float = 0.5, min_silence_ms: int = 400, speech_pad_ms: int = 200) -> None:
+    def __init__(
+        self, threshold: float = 0.5, min_silence_ms: int = 400, speech_pad_ms: int = 200, pause_ms: int = 128
+    ) -> None:
         self.threshold = threshold
         self.neg_threshold = max(threshold - 0.15, 0.01)
         # 向上取整：静音至少要达到设定时长（注意 Python 的 round(12.5) == 12）
         self.min_silence_chunks = max(1, math.ceil(min_silence_ms / CHUNK_MS))
+        # 静音到 pause_ms 时先发一个 pause 事件：识别可以马上跑一次，等到判定说完时结果已经现成了
+        self.pause_chunks = max(1, math.ceil(pause_ms / CHUNK_MS))
         self._preroll: deque[AudioChunk] = deque(maxlen=max(0, round(speech_pad_ms / CHUNK_MS)))
         self.in_speech = False
         self._silent_chunks = 0
@@ -68,14 +73,20 @@ class VadSegmenter:
                 earlier = list(self._preroll)
                 self._preroll.clear()
                 start = earlier[0].start if earlier else chunk.start
-                return [VadEvent("start", start)] + [VadEvent("audio", c.end, c) for c in earlier + [chunk]]
+                return (
+                    [VadEvent("start", start)]
+                    + [VadEvent("audio", c.end, c) for c in earlier]
+                    + [VadEvent("audio", chunk.end, chunk, speech=True)]
+                )
             self._preroll.append(chunk)
             return []
 
         # 说话中：静音的块也照样送给识别，词尾常常落在这些块里
-        events = [VadEvent("audio", chunk.end, chunk)]
+        events = [VadEvent("audio", chunk.end, chunk, speech=prob >= self.threshold)]
         if prob < self.neg_threshold:
             self._silent_chunks += 1
+            if self._silent_chunks == self.pause_chunks < self.min_silence_chunks:
+                events.append(VadEvent("pause", chunk.end))
             if self._silent_chunks >= self.min_silence_chunks:
                 speech_end = chunk.end - self._silent_chunks * CHUNK_MS / 1000
                 self.in_speech = False

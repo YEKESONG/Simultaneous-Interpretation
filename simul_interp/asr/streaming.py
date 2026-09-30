@@ -142,6 +142,7 @@ class StreamingTranscriber:
         self.buffer = np.zeros(0, dtype=np.float32)
         self.utterance_start = start  # 这句话（含句首预留）开始的音频流时间
         self.buffer_start = start  # 缓冲区第一个采样点的音频流时间
+        self.last_speech_end = start  # VAD 认为“真的有人在说话”的最后一块的结束时间
         self.committed: list[str] = []  # 缓冲区里已确认（已发出去）的词，只追加，切缓冲区时移到 history
         self.tail: list[str] = []  # 上一次识别里还没确认的词
         self.last_pass_end = start  # 上一次识别覆盖到的音频流时间
@@ -175,9 +176,17 @@ class StreamingTranscriber:
     def start_utterance(self, time_s: float) -> None:
         self._reset(time_s)
 
-    def add_audio(self, samples: np.ndarray) -> None:
+    def add_audio(self, samples: np.ndarray, speech: bool = True) -> None:
+        """speech：VAD 认为这一块真的有人在说话（句首预留、句中的停顿都是 False）。"""
         self.buffer = np.concatenate([self.buffer, samples])
         self.new_audio_s += len(samples) / SAMPLE_RATE
+        if speech:
+            self.last_speech_end = self.buffer_end
+
+    @property
+    def speech_in_buffer_s(self) -> float:
+        """缓冲区（切过之后）里的说话持续到哪儿，相对缓冲区开头。整句确认、在句末切过之后，这个值接近 0。"""
+        return self.last_speech_end - self.buffer_start
 
     # ---- 识别 ----
 
@@ -197,6 +206,9 @@ class StreamingTranscriber:
     def process(self) -> AsrUpdate | None:
         """说话期间调用：重新识别整个缓冲区，确认和上一次一致的部分。"""
         if self.buffer_s < self.min_audio_s:
+            return None
+        if self.speech_in_buffer_s < 0.1:
+            # 切过之后缓冲区里还没有新的说话（只有句间停顿）：对着静音识别只会得到幻觉（实测 “chaîne.”）
             return None
         started = time.monotonic()
         segments, hyp, ends, times = self._recognize(word_timestamps=self.buffer_s > self.soft_buffer_s)
@@ -229,7 +241,9 @@ class StreamingTranscriber:
         started = time.monotonic()
         end = self.buffer_end
         words: list[str] = []
-        if speech_end - self.utterance_start >= MIN_UTTERANCE_S:
+        # 两种情况什么都不确认：整句话太短（多半是杂音）；缓冲区（切过之后）里几乎没有真的说话——
+        # 最后一句已经整句确认、在句末切过，这时的暂定尾巴只可能是对静音的幻觉（实测 “chaîne.”）
+        if speech_end - self.utterance_start >= MIN_UTTERANCE_S and self.speech_in_buffer_s >= MIN_NEW_SPEECH_S:
             unheard = speech_end - max(self.buffer_start, self.last_pass_end)  # 上一次识别之后又说了多久
             if self.last_pass_end >= speech_end + 0.1 and (self.tail or self.committed):
                 words = self.tail  # 上一次识别已经覆盖到说话结束，直接确认，省一次识别
