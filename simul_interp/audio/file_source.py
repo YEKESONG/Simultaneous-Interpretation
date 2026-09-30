@@ -28,6 +28,7 @@ class FileAudioSource(AudioSource):
         self.speed = speed
         self.tail_silence_s = tail_silence_s
         self.name = f"文件 {self.path.name}"
+        self.started_at: float | None = None  # 开始“播放”的 time.monotonic()，基准测试用它换算延迟
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -44,7 +45,7 @@ class FileAudioSource(AudioSource):
 
     def _run(self) -> None:
         tail = np.zeros(int(self.tail_silence_s * SAMPLE_RATE), dtype=np.float32)
-        started = time.monotonic()
+        started = self.started_at = time.monotonic()
         sent = 0
         try:
             for block in itertools.chain(self._decode(), _split(tail)):
@@ -67,6 +68,14 @@ class FileAudioSource(AudioSource):
             yield from _decode_with_ffmpeg(ffmpeg, self.path)
         else:
             yield from _decode_wav(self.path)
+
+
+def load_audio(path: str | Path) -> np.ndarray:
+    """一次性把整个文件解码成 16 kHz 单声道 float32。"""
+    path = Path(path)
+    ffmpeg = shutil.which("ffmpeg")
+    blocks = list(_decode_with_ffmpeg(ffmpeg, path) if ffmpeg else _decode_wav(path))
+    return np.concatenate(blocks) if blocks else np.zeros(0, dtype=np.float32)
 
 
 def _split(samples: np.ndarray) -> Iterator[np.ndarray]:

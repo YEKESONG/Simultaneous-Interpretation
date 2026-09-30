@@ -1,0 +1,137 @@
+import numpy as np
+
+from simul_interp.asr.streaming import StreamingTranscriber, align_prefix, repeated_head
+from simul_interp.asr.types import Segment
+from simul_interp.audio.base import SAMPLE_RATE
+
+SCRIPT = "Bonjour à tous. Nous allons parler de l'intelligence artificielle. Merci beaucoup."
+
+
+def timeline(text, word_s=0.3, gap_s=0.05):
+    """给剧本里的每个词排上时间：每个词 0.3 秒，词间隔 0.05 秒。"""
+    words, t = [], 0.2
+    for w in text.split():
+        words.append((t, t + word_s, w))
+        t += word_s + gap_s
+    return words
+
+
+class FakeBackend:
+    """按剧本“识别”：只返回缓冲区里已经完整听到的词；正说到一半的词被截成半个（模拟不稳定的尾巴）。"""
+
+    def __init__(self, words):
+        self.words = words
+        self.calls = 0
+        self.transcriber = None
+
+    def load(self):
+        pass
+
+    def transcribe(self, audio, prompt="", word_timestamps=False):
+        self.calls += 1
+        t0 = self.transcriber.buffer_start
+        t1 = t0 + len(audio) / SAMPLE_RATE
+        items = []
+        for s, e, w in self.words:
+            if s < t0 - 0.01:
+                continue
+            if e <= t1:
+                items.append((s - t0, e - t0, w))
+            elif s < t1:
+                items.append((s - t0, t1 - t0, w[: max(1, len(w) // 2)]))
+        segments, current = [], []
+        for item in items:
+            current.append(item)
+            if item[2].endswith("."):
+                segments.append(self._segment(current, word_timestamps))
+                current = []
+        if current:
+            segments.append(self._segment(current, word_timestamps))
+        return segments
+
+    @staticmethod
+    def _segment(items, word_timestamps):
+        return Segment(items[0][0], items[-1][1], " ".join(w for _, _, w in items), items if word_timestamps else [])
+
+
+def make(words, **kwargs):
+    backend = FakeBackend(words)
+    transcriber = StreamingTranscriber(backend, **kwargs)
+    backend.transcriber = transcriber
+    return backend, transcriber
+
+
+def feed(transcriber, seconds):
+    transcriber.add_audio(np.zeros(int(seconds * SAMPLE_RATE), dtype=np.float32))
+
+
+def test_align_prefix_tolerates_small_changes():
+    committed = "nous allons parler de".split()
+    assert align_prefix(committed, "Nous allons parlé de l'intelligence".split()) == 4
+    assert align_prefix(committed, "nous, allons parler de la".split()) == 4
+    assert align_prefix("a b c d".split(), "a b x".split()) == 3  # 新结果比已确认的还短，也不能出错
+
+
+def test_repeated_head():
+    assert repeated_head("tous. Nous allons".split(), "Bonjour à tous.".split()) == 1
+    assert repeated_head("Nous allons".split(), "Bonjour à tous.".split()) == 0
+
+
+def test_word_is_committed_only_after_two_agreeing_passes():
+    words = timeline(SCRIPT)
+    _, t = make(words)
+    t.start_utterance(0.0)
+    feed(t, 0.62)  # 听到 “Bonjour”（0.2~0.5 秒）
+    first = t.process()
+    assert first.committed == ""  # 第一次出现，只是暂定
+    assert first.partial.startswith("Bonjour")
+    feed(t, 0.6)
+    second = t.process()
+    assert second.committed.startswith("Bonjour")  # 两次一致才确认
+
+
+def test_full_stream_has_no_duplicates_or_losses_and_trims_buffer():
+    words = timeline(SCRIPT)
+    backend, t = make(words)
+    t.start_utterance(0.0)
+    committed = []
+    trimmed = False
+    for _ in range(12):
+        feed(t, 0.6)
+        update = t.process()
+        if update and update.committed:
+            committed += update.committed.split()
+        trimmed = trimmed or t.buffer_start > 0
+    speech_end = words[-1][1]
+    final = t.finish(speech_end)
+    committed += final.committed.split()
+    assert committed == SCRIPT.split()
+    assert trimmed  # 整句确认后缓冲区被切过
+    assert "tous." in t.history
+
+
+def test_finish_reuses_last_pass_when_it_covers_speech_end():
+    words = timeline("Bonjour à tous.")
+    backend, t = make(words)
+    t.start_utterance(0.0)
+    feed(t, 1.6)  # 已经听完整句（结束于 1.25 秒）
+    t.process()
+    calls = backend.calls
+    final = t.finish(speech_end=words[-1][1])
+    assert backend.calls == calls  # 没有再识别一次
+    assert final.final and final.committed.endswith("tous.")
+
+
+def test_force_trim_when_no_sentence_end():
+    words = timeline(" ".join(["mot"] * 60))  # 一直说、没有句号，约 21 秒
+    backend, t = make(words, max_buffer_s=6.0)
+    t.start_utterance(0.0)
+    committed = []
+    for _ in range(40):
+        feed(t, 0.6)
+        update = t.process()
+        if update and update.committed:
+            committed += update.committed.split()
+        assert t.buffer_s < 6.0 + 1.0  # 缓冲区不会无限增长
+    committed += t.finish(words[-1][1]).committed.split()
+    assert len(committed) == 60

@@ -114,6 +114,12 @@ def cmd_vad(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bench_asr(args: argparse.Namespace) -> int:
+    from .bench import bench_asr
+
+    return bench_asr(load_config(args.config), args.file, speed=args.speed)
+
+
 def add_source_args(p: argparse.ArgumentParser, default_speed: float | None = None) -> None:
     p.add_argument("--file", type=Path, default=None, help="用音频文件代替内录（任何 ffmpeg 支持的格式）")
     p.add_argument("--speed", type=float, default=default_speed, help="文件播放倍速：1 = 实时，0 = 尽快")
@@ -137,6 +143,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("vad", help="只跑语音检测，打印每一段语音的起止时间")
     add_source_args(p, default_speed=0.0)
     p.set_defaults(func=cmd_vad)
+
+    p = sub.add_parser("bench-asr", help="用音频文件按真实语速跑流式识别，统计延迟和准确率")
+    p.add_argument("file", type=Path, help="测试音频；同名 .txt 是标准答案（可选）")
+    p.add_argument("--speed", type=float, default=1.0, help="播放倍速，默认 1 = 实时")
+    p.set_defaults(func=cmd_bench_asr)
     return parser
 
 

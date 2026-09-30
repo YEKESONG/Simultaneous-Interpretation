@@ -27,8 +27,9 @@ def test_start_with_preroll_and_end_after_min_silence():
     # 句首往前多留 200 ms ≈ 6 块
     assert abs(start.time - (20 - 6) * DT) < 1e-9
     end = next(e for e in events if e.type == "end")
-    # 静音 400 ms ≈ 13 块之后才判定结束
+    # 静音 400 ms ≈ 13 块之后才判定结束；真正停止说话是在静音开始的那一刻
     assert abs(end.time - (40 + 13) * DT) < 1e-9
+    assert abs(end.speech_end - 40 * DT) < 1e-9
     audio = [e for e in events if e.type == "audio"]
     assert len(audio) == 6 + 20 + 13
 

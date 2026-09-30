@@ -45,8 +45,9 @@ class SileroVad:
 @dataclass
 class VadEvent:
     type: Literal["start", "audio", "end"]
-    time: float  # 音频流时间（秒）
+    time: float  # 音频流时间（秒）；end 事件是“判定说完”的时刻
     chunk: AudioChunk | None = None  # 只有 audio 事件带音频
+    speech_end: float = 0.0  # 只有 end 事件有：真正停止说话的时刻（= time 减去那段静音）
 
 
 class VadSegmenter:
@@ -76,9 +77,10 @@ class VadSegmenter:
         if prob < self.neg_threshold:
             self._silent_chunks += 1
             if self._silent_chunks >= self.min_silence_chunks:
+                speech_end = chunk.end - self._silent_chunks * CHUNK_MS / 1000
                 self.in_speech = False
                 self._silent_chunks = 0
-                events.append(VadEvent("end", chunk.end))
+                events.append(VadEvent("end", chunk.end, speech_end=speech_end))
         elif prob >= self.threshold:
             self._silent_chunks = 0
         return events
@@ -87,5 +89,5 @@ class VadSegmenter:
         """音频源结束时调用：如果还在说话，补一个结束事件。"""
         if self.in_speech:
             self.in_speech = False
-            return [VadEvent("end", time)]
+            return [VadEvent("end", time, speech_end=time)]
         return []
