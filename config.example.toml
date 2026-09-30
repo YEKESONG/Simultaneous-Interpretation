@@ -17,7 +17,7 @@ model = "mlx-community/whisper-large-v3-mlx"
 language = "fr"
 step_s = 0.6               # 说话期间每隔多久重新识别一次
 max_buffer_s = 12.0        # 识别缓冲区的上限，超过就强制切分
-quantize_bits = 0          # macOS：在内存里把同一个模型量化成 8 或 4 位，识别快 15~25%（0 = 不量化）
+quantize_bits = 4          # macOS：在内存里把同一个模型量化成 4 位，识别快约 25%（0 = 不量化）
 # 以下只对 Windows 的 faster-whisper 后端有效
 faster_whisper_model = "large-v3"
 device = "auto"            # auto / cuda / cpu

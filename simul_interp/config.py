@@ -36,9 +36,9 @@ class AsrConfig:
     device: str = "auto"  # faster-whisper：auto / cuda / cpu
     compute_type: str = "default"  # faster-whisper：显卡上可用 float16，纯 CPU 可用 int8
     allow_download: bool = False  # 本地没有模型时是否允许自动下载（large-v3 约 3 GB）
-    # mlx：在内存里把同一个模型的权重量化成 8 位或 4 位（0 = 不量化）。识别更快，不下载任何东西，
-    # 但数值精度略有变化，开启前先用 bench-asr 对比准确率
-    quantize_bits: int = 0
+    # mlx：在内存里把同一个模型的权重量化成 8 位或 4 位（0 = 不量化）。不下载任何东西；
+    # 实测识别快约 25%、测试音频文字一致（见 DEVLOG S9a），用户决定默认开启
+    quantize_bits: int = 4
     language: str = "fr"
     step_s: float = 0.6  # 说话期间每隔多久重新识别一次
     max_buffer_s: float = 12.0  # 识别缓冲区的上限，超过就强制切分
