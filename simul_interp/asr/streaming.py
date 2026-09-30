@@ -33,6 +33,9 @@ HISTORY_WORDS = 200
 MAX_WORDS_PER_S = 6.0  # 正常法语语速约每秒 3 个词，快的也很少超过 5 个
 TOKENS_PER_S = 10  # 生成 token 的上限按音频长度算：正常语速每秒不到 5 个 token（含标点、时间戳），留足余量
 MIN_NEW_SPEECH_S = 0.3  # 上一次识别之后又说了不到这么久（且之前的都已确认），就不再做最后一次识别
+# 切过缓冲区之后，被 VAD 标为说话的总时长不到这么多，就当作上一句的尾巴：一句话说完后，
+# VAD 的说话概率要滞后 0.1~0.3 秒才降下去，切开后的缓冲区开头常常只有这点尾巴（实测对着它幻觉出 “chaîne.”）
+POST_TRIM_MIN_SPEECH_S = 0.4
 _CLAUSE_END = re.compile(r"[,;:.?!…][\"'»”)]*$")
 
 
@@ -143,6 +146,7 @@ class StreamingTranscriber:
         self.utterance_start = start  # 这句话（含句首预留）开始的音频流时间
         self.buffer_start = start  # 缓冲区第一个采样点的音频流时间
         self.last_speech_end = start  # VAD 认为“真的有人在说话”的最后一块的结束时间
+        self._speech_spans: list[tuple[float, float]] = []  # 被 VAD 标为说话的时间段（音频流时间）
         self.committed: list[str] = []  # 缓冲区里已确认（已发出去）的词，只追加，切缓冲区时移到 history
         self.tail: list[str] = []  # 上一次识别里还没确认的词
         self.last_pass_end = start  # 上一次识别覆盖到的音频流时间
@@ -178,15 +182,26 @@ class StreamingTranscriber:
 
     def add_audio(self, samples: np.ndarray, speech: bool = True) -> None:
         """speech：VAD 认为这一块真的有人在说话（句首预留、句中的停顿都是 False）。"""
+        start = self.buffer_end
         self.buffer = np.concatenate([self.buffer, samples])
         self.new_audio_s += len(samples) / SAMPLE_RATE
         if speech:
+            if self._speech_spans and abs(self._speech_spans[-1][1] - start) < 1e-6:
+                self._speech_spans[-1] = (self._speech_spans[-1][0], self.buffer_end)  # 和上一段连着，合并
+            else:
+                self._speech_spans.append((start, self.buffer_end))
             self.last_speech_end = self.buffer_end
 
     @property
     def speech_in_buffer_s(self) -> float:
-        """缓冲区（切过之后）里的说话持续到哪儿，相对缓冲区开头。整句确认、在句末切过之后，这个值接近 0。"""
-        return self.last_speech_end - self.buffer_start
+        """缓冲区（切过之后）里被 VAD 标为说话的总时长。整句确认、在句末切过之后，这个值接近 0。"""
+        return sum(max(0.0, end - max(start, self.buffer_start)) for start, end in self._speech_spans)
+
+    def _enough_speech(self) -> bool:
+        """缓冲区里有没有足够的“真的在说话”。切过之后要求更多（POST_TRIM_MIN_SPEECH_S），
+        否则 VAD 滞后的那点上一句的尾巴也会被当成新的说话。"""
+        trimmed = self.buffer_start > self.utterance_start
+        return self.speech_in_buffer_s >= (POST_TRIM_MIN_SPEECH_S if trimmed else 0.1)
 
     # ---- 识别 ----
 
@@ -207,8 +222,8 @@ class StreamingTranscriber:
         """说话期间调用：重新识别整个缓冲区，确认和上一次一致的部分。"""
         if self.buffer_s < self.min_audio_s:
             return None
-        if self.speech_in_buffer_s < 0.1:
-            # 切过之后缓冲区里还没有新的说话（只有句间停顿）：对着静音识别只会得到幻觉（实测 “chaîne.”）
+        if not self._enough_speech():
+            # 切过之后缓冲区里还没有新的说话（只有句间停顿和 VAD 滞后的尾巴）：对着它识别只会得到幻觉
             return None
         started = now()
         segments, hyp, ends, times = self._recognize(word_timestamps=self.buffer_s > self.soft_buffer_s)
@@ -243,7 +258,7 @@ class StreamingTranscriber:
         words: list[str] = []
         # 两种情况什么都不确认：整句话太短（多半是杂音）；缓冲区（切过之后）里几乎没有真的说话——
         # 最后一句已经整句确认、在句末切过，这时的暂定尾巴只可能是对静音的幻觉（实测 “chaîne.”）
-        if speech_end - self.utterance_start >= MIN_UTTERANCE_S and self.speech_in_buffer_s >= MIN_NEW_SPEECH_S:
+        if speech_end - self.utterance_start >= MIN_UTTERANCE_S and self._enough_speech():
             unheard = speech_end - max(self.buffer_start, self.last_pass_end)  # 上一次识别之后又说了多久
             if self.last_pass_end >= speech_end + 0.1 and (self.tail or self.committed):
                 words = self.tail  # 上一次识别已经覆盖到说话结束，直接确认，省一次识别
@@ -299,6 +314,7 @@ class StreamingTranscriber:
         self.committed = self.committed[moved:]
         self.buffer = self.buffer[int(seconds * SAMPLE_RATE) :]
         self.buffer_start += seconds
+        self._speech_spans = [(start, end) for start, end in self._speech_spans if end > self.buffer_start]
         self._after_trim = True
 
     def _trim_at_segment(self, segments: list[Segment], hyp: list[str], ends: list[int], confirmed: int) -> bool:

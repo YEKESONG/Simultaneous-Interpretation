@@ -134,6 +134,25 @@ def test_no_pass_and_no_commit_on_silence_after_sentence_trim():
     assert final.committed == ""  # 也不会把幻觉当成尾巴确认
 
 
+def test_vad_lag_after_sentence_is_not_treated_as_new_speech():
+    """实测问题：一句话说完后，VAD 的说话概率还要滞后 0.1~0.3 秒才降下去。
+    切开后的缓冲区开头只有这点“尾巴”，却被当成新的说话，于是识别对着它幻觉出 “chaîne.” 并被确认。"""
+    words = timeline("Bonjour à tous.")  # “tous.” 在 1.2 秒说完
+    backend = FakeBackend(words, hallucinate_on_silence=True)
+    t = StreamingTranscriber(backend)
+    backend.transcriber = t
+    t.start_utterance(0.0)
+    # VAD 一直把音频标成“在说话”，直到 1.55 秒（滞后 0.35 秒）
+    for until in (0.6, 1.0, 1.3, 1.55):
+        feed(t, until - t.buffer_end, speech=True)
+        t.process()
+    assert t.buffer_start > 1.1  # “tous.” 已确认，缓冲区在句末切过
+    feed(t, 0.4, speech=False)
+    calls = backend.calls
+    assert t.process() is None and backend.calls == calls  # 0.35 秒的滞后尾巴不算新的说话：不识别
+    assert t.finish(speech_end=1.55).committed == ""  # 也不确认任何东西
+
+
 def test_word_is_committed_only_after_two_agreeing_passes():
     words = timeline(SCRIPT)
     _, t = make(words)
