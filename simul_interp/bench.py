@@ -10,11 +10,11 @@ import difflib
 import json
 import statistics
 import threading
-import time
 from pathlib import Path
 
 from .asr.streaming import norm
 from .asr.types import AsrBackend, AsrUpdate
+from .clock import now
 from .config import Config
 
 GREY, RESET = "\033[90m", "\033[0m"
@@ -90,14 +90,14 @@ def bench_translate(cfg: Config, sentences_file: Path | None = None) -> int:
     context: deque[str] = deque(maxlen=cfg.translate.context_sentences)
     firsts, totals = [], []
     for sentence in sentences:
-        started = time.monotonic()
+        started = now()
         first = None
         output = ""
         for delta in translator.stream(sentence, list(context)):
             if first is None:
-                first = time.monotonic() - started
+                first = now() - started
             output += delta
-        total = time.monotonic() - started
+        total = now() - started
         firsts.append(first or total)
         totals.append(total)
         print(f"[首字 {firsts[-1]:.2f}s｜完成 {total:.2f}s] {sentence}\n    → {output.strip()}")

@@ -37,4 +37,4 @@ class AsrUpdate:
     final: bool  # True = 这一句话已经说完（VAD 判定），committed 是这句话最后剩下的部分
     audio_end: float  # 这次结果覆盖到的音频流时间（秒）
     compute_s: float  # 这次识别花的时间（秒）
-    wall: float  # 产出结果时的 time.monotonic()
+    wall: float  # 产出结果的时刻（clock.now）

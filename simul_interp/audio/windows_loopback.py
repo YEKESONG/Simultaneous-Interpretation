@@ -14,10 +14,10 @@ from __future__ import annotations
 
 import logging
 import threading
-import time
 
 import numpy as np
 
+from ..clock import now
 from .base import SAMPLE_RATE, AudioSource
 
 logger = logging.getLogger(__name__)
@@ -59,7 +59,7 @@ class WindowsLoopbackSource(AudioSource):
 
     def start(self) -> None:
         self._open()
-        self._gaps.mark(time.monotonic())
+        self._gaps.mark(now())
         self._filler = threading.Thread(target=self._fill_gaps, name="wasapi-gap-filler", daemon=True)
         self._filler.start()
 
@@ -115,7 +115,7 @@ class WindowsLoopbackSource(AudioSource):
         frames = np.frombuffer(in_data, dtype=np.float32).reshape(-1, self._channels)
         mono = frames.mean(axis=1)
         with self._feed_lock:
-            self._gaps.mark(time.monotonic())
+            self._gaps.mark(now())
             resampled = self._resampler.resample_chunk(mono)
             if len(resampled):
                 self._feed(resampled)
@@ -124,6 +124,6 @@ class WindowsLoopbackSource(AudioSource):
     def _fill_gaps(self) -> None:
         while not self._stop.wait(0.05):
             with self._feed_lock:
-                count = self._gaps.missing_samples(time.monotonic())
+                count = self._gaps.missing_samples(now())
                 if count:
                     self._feed(np.zeros(count, dtype=np.float32))

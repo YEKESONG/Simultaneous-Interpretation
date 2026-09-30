@@ -19,11 +19,11 @@
 from __future__ import annotations
 
 import re
-import time
 
 import numpy as np
 
 from ..audio.base import SAMPLE_RATE
+from ..clock import now
 from .types import AsrBackend, AsrUpdate, Segment
 
 _NON_WORD = re.compile(r"[^\w'’-]+")
@@ -210,7 +210,7 @@ class StreamingTranscriber:
         if self.speech_in_buffer_s < 0.1:
             # 切过之后缓冲区里还没有新的说话（只有句间停顿）：对着静音识别只会得到幻觉（实测 “chaîne.”）
             return None
-        started = time.monotonic()
+        started = now()
         segments, hyp, ends, times = self._recognize(word_timestamps=self.buffer_s > self.soft_buffer_s)
         covered = self._covered(hyp)
         self._after_trim = False
@@ -232,13 +232,13 @@ class StreamingTranscriber:
             partial=" ".join(self.tail),
             final=False,
             audio_end=self.last_pass_end,
-            compute_s=time.monotonic() - started,
-            wall=time.monotonic(),
+            compute_s=now() - started,
+            wall=now(),
         )
 
     def finish(self, speech_end: float) -> AsrUpdate:
         """VAD 判定一句说完：把剩下的全部确认，然后清空缓冲区。"""
-        started = time.monotonic()
+        started = now()
         end = self.buffer_end
         words: list[str] = []
         # 两种情况什么都不确认：整句话太短（多半是杂音）；缓冲区（切过之后）里几乎没有真的说话——
@@ -264,8 +264,8 @@ class StreamingTranscriber:
             partial="",
             final=True,
             audio_end=end,
-            compute_s=time.monotonic() - started,
-            wall=time.monotonic(),
+            compute_s=now() - started,
+            wall=now(),
         )
 
     # ---- 切缓冲区 ----

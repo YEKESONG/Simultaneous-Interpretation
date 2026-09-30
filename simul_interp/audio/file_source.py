@@ -16,6 +16,7 @@ from pathlib import Path
 
 import numpy as np
 
+from ..clock import now
 from .base import CHUNK_SAMPLES, SAMPLE_RATE, AudioSource
 
 
@@ -28,7 +29,7 @@ class FileAudioSource(AudioSource):
         self.speed = speed
         self.tail_silence_s = tail_silence_s
         self.name = f"文件 {self.path.name}"
-        self.started_at: float | None = None  # 开始“播放”的 time.monotonic()，基准测试用它换算延迟
+        self.started_at: float | None = None  # 开始“播放”的时刻（clock.now），基准测试用它换算延迟
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -45,7 +46,7 @@ class FileAudioSource(AudioSource):
 
     def _run(self) -> None:
         tail = np.zeros(int(self.tail_silence_s * SAMPLE_RATE), dtype=np.float32)
-        started = self.started_at = time.monotonic()
+        started = self.started_at = now()
         sent = 0
         try:
             for block in itertools.chain(self._decode(), _split(tail)):
@@ -54,7 +55,7 @@ class FileAudioSource(AudioSource):
                 if self.speed > 0:
                     # 等到这一块“播放完”的时刻再送出，和真实内录一样：声音总是播完才拿得到
                     due = started + (sent + len(block)) / SAMPLE_RATE / self.speed
-                    delay = due - time.monotonic()
+                    delay = due - now()
                     if delay > 0:
                         time.sleep(delay)
                 self._feed(block)

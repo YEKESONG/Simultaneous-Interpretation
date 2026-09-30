@@ -20,6 +20,7 @@ from dataclasses import dataclass
 import httpx
 
 from .asr.streaming import norm
+from .clock import now
 from .config import TranslateConfig
 
 logger = logging.getLogger(__name__)
@@ -47,7 +48,7 @@ class ChatTranslator:
 
     def warm_up(self) -> None:
         """启动时先建立 TLS 连接（之后复用），顺便检查密钥，避免第一句话多花一次握手的时间。"""
-        started = time.monotonic()
+        started = now()
         try:
             response = self._client.get("/models")
         except httpx.HTTPError as exc:
@@ -55,7 +56,7 @@ class ChatTranslator:
             return
         if response.status_code in (401, 403):
             raise TranslationError(f"翻译 API 密钥无效（HTTP {response.status_code}），请检查 .env")
-        logger.info("已连接翻译服务 %s（%.0f ms）", self.cfg.base_url, (time.monotonic() - started) * 1000)
+        logger.info("已连接翻译服务 %s（%.0f ms）", self.cfg.base_url, (now() - started) * 1000)
 
     def system_prompt(self) -> str:
         lines = [
@@ -171,7 +172,7 @@ def unit_key(text: str) -> tuple[str, ...]:
 class TranslationUnit:
     id: int
     source: str
-    ready_at: float  # 原文确认、送去翻译的 time.monotonic()
+    ready_at: float  # 原文确认、送去翻译的时刻（clock.now）
     translation: str = ""
     first_token_at: float | None = None  # 投机翻译命中时可能早于 ready_at：原文还没确认，译文就已经开始出来了
     done_at: float | None = None
@@ -241,7 +242,7 @@ class TranslationStage:
         units = []
         for source in self.builder.add(committed, final):
             with self._lock:
-                unit = TranslationUnit(self._next_id, source, time.monotonic())
+                unit = TranslationUnit(self._next_id, source, now())
                 self._next_id += 1
                 context = list(self._context)
                 self._context.append(source)
@@ -303,7 +304,7 @@ class TranslationStage:
                 with self._lock:
                     job.translation += delta
                     if job.first_token_at is None:
-                        job.first_token_at = time.monotonic()
+                        job.first_token_at = now()
                     unit = job.unit
                     if unit is not None:
                         unit.translation = job.translation
@@ -320,7 +321,7 @@ class TranslationStage:
         finally:
             stream.close()
         with self._lock:
-            job.done_at = time.monotonic()
+            job.done_at = now()
             unit = job.unit
             if unit is not None and not unit.done:
                 unit.translation = job.translation.strip()
@@ -333,14 +334,14 @@ class TranslationStage:
         try:
             for delta in self.translator.stream(unit.source, context):
                 if unit.first_token_at is None:
-                    unit.first_token_at = time.monotonic()
+                    unit.first_token_at = now()
                 unit.translation += delta
                 self.on_update(unit)
         except Exception as exc:  # 翻译失败只影响这一句，不能让整个程序停下
             unit.error = str(exc)
             logger.error("翻译失败：%s", exc)
         unit.translation = unit.translation.strip()
-        unit.done_at = time.monotonic()
+        unit.done_at = now()
         self.on_update(unit)
 
     def close(self) -> None:

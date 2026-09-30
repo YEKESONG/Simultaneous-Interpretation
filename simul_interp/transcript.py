@@ -6,6 +6,7 @@ import threading
 import time
 from pathlib import Path
 
+from .clock import now
 from .translate import TranslationUnit
 
 
@@ -19,7 +20,7 @@ class TranscriptWriter:
         if path.exists():  # 不覆盖已有的记录
             path = directory / f"{base}_{time.strftime('%H%M%S')}_译文.md"
         self.path = path
-        self._started = time.monotonic()
+        self._started = now()
         self._lock = threading.Lock()
         self._count = 0
         header = [f"# 同传记录：{source_name}", ""]
