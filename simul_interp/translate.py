@@ -133,6 +133,7 @@ class UnitBuilder:
         self.clause_min_words = clause_min_words
         self.max_words = max_words
         self.pending: list[str] = []
+        self.pending_times: list[float | None] = []  # 和 pending 一一对应：每个词在音频流里的时间（秒）
 
     def is_boundary(self, word: str, count: int) -> bool:
         """攒到第 count 个词（就是 word）时，是否凑成了一个翻译单元。"""
@@ -143,16 +144,30 @@ class UnitBuilder:
         )
 
     def add(self, committed: str, final: bool) -> list[str]:
+        return [source for source, _ in self.add_timed(committed, final)]
+
+    def add_timed(
+        self, committed: str, final: bool, times: list[float] | None = None
+    ) -> list[tuple[str, float | None]]:
+        """和 add 一样，另外带上每个词在音频流里的时间（times 和 committed 里的词一一对应）。
+        返回 (翻译单元, 它第一个词的时间)；没给时间或者数量对不上时，时间为 None。"""
+        words = committed.split()
+        if times is None or len(times) != len(words):
+            times = [None] * len(words)
         units = []
-        for word in committed.split():
+        for word, time_s in zip(words, times):
             self.pending.append(word)
+            self.pending_times.append(time_s)
             if self.is_boundary(word, len(self.pending)):
-                units.append(" ".join(self.pending))
-                self.pending = []
+                units.append(self._take())
         if final and self.pending:
-            units.append(" ".join(self.pending))
-            self.pending = []
+            units.append(self._take())
         return units
+
+    def _take(self) -> tuple[str, float | None]:
+        unit = (" ".join(self.pending), self.pending_times[0])
+        self.pending, self.pending_times = [], []
+        return unit
 
     def first_unit(self, words: list[str]) -> int:
         """把 words 当作从头开始攒的词，返回第一个翻译单元有几个词；凑不成返回 0。
@@ -178,6 +193,7 @@ class TranslationUnit:
     done_at: float | None = None
     error: str = ""
     speculative: bool = False  # 译文是否来自投机翻译
+    audio_start: float | None = None  # 这段原文在音频流（也就是录音）里大约从第几秒开始；不知道时为 None
 
     @property
     def done(self) -> bool:
@@ -237,12 +253,13 @@ class TranslationStage:
             job = self._spec
             return job.translation.strip() if job is not None and not job.cancelled else ""
 
-    def feed(self, committed: str, final: bool) -> list[TranslationUnit]:
-        """把新确认的法语交给翻译阶段，返回因此新建的翻译单元。"""
+    def feed(self, committed: str, final: bool, word_times: list[float] | None = None) -> list[TranslationUnit]:
+        """把新确认的法语交给翻译阶段，返回因此新建的翻译单元。
+        word_times：committed 里每个词在音频流里的时间（秒），用来给会话记录标上录音里的位置。"""
         units = []
-        for source in self.builder.add(committed, final):
+        for source, start in self.builder.add_timed(committed, final, word_times):
             with self._lock:
-                unit = TranslationUnit(self._next_id, source, now())
+                unit = TranslationUnit(self._next_id, source, now(), audio_start=start)
                 self._next_id += 1
                 context = list(self._context)
                 self._context.append(source)

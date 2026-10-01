@@ -10,6 +10,13 @@ from .clock import now
 from .translate import TranslationUnit
 
 
+def format_position(seconds: int) -> str:
+    """分:秒；超过一小时写成 时:分:秒，和播放器上显示的一样。"""
+    hours, rest = divmod(seconds, 3600)
+    stamp = f"{rest // 60:02d}:{rest % 60:02d}"
+    return f"{hours}:{stamp}" if hours else stamp
+
+
 class TranscriptWriter:
     def __init__(self, directory: Path, source_name: str, meta: dict[str, str], stem: str | None = None) -> None:
         """stem：用音频文件做输入时传文件名（不含扩展名），记录就叫 <stem>_译文.md；
@@ -29,9 +36,13 @@ class TranscriptWriter:
         self._write("\n".join(header) + "\n", mode="w")
 
     def add(self, unit: TranslationUnit) -> None:
-        # 四舍五入而不是 int() 截断：两个很大的时钟读数相减会得到 64.9999999 这样的值，截断就少了 1 秒
-        elapsed = round(unit.ready_at - self._started)
-        stamp = f"{elapsed // 60:02d}:{elapsed % 60:02d}"
+        if unit.audio_start is not None:
+            # 音频流里的位置，也就是录音里的位置。向下取整：宁可早一点，从这个时间开始听不会漏掉开头
+            elapsed = int(unit.audio_start)
+        else:
+            # 四舍五入而不是 int() 截断：两个很大的时钟读数相减会得到 64.9999999 这样的值，截断就少了 1 秒
+            elapsed = round(unit.ready_at - self._started)
+        stamp = format_position(elapsed)
         translation = unit.translation or (f"（翻译失败：{unit.error}）" if unit.error else "（未翻译）")
         self._write(f"**[{stamp}]** {unit.source}\n\n> {translation}\n\n")
         self._count += 1

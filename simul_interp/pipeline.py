@@ -23,6 +23,10 @@ from .translate import ChatTranslator, MockTranslator, TranslationStage, Transla
 
 logger = logging.getLogger(__name__)
 
+# 一段话的第一个词从开始说到被确认，实测要 0.8~2.1 秒（中位数 1.4 秒，DEVLOG S14b）。
+# 会话记录里的时间按“确认时刻 - 这个值”估算：取 2 秒，标出来的位置一般落在这段话开头之前 0~1 秒，从那里开始听正好
+CONFIRM_LAG_S = 2.0
+
 
 class View(Protocol):
     def on_live(self, pending: str, partial: str, translation: str = "") -> None:
@@ -98,6 +102,11 @@ class Interpreter:
             }
             if self.recorder is not None:
                 meta["录音"] = str(self.recorder.path)
+                meta["时间"] = "每段前面的时间是这段话在录音里的位置（一般比开头早不到一秒，可能差一两秒）"
+            elif not live:
+                meta["时间"] = "每段前面的时间是这段话在音频文件里的位置（一般比开头早不到一秒，可能差一两秒）"
+            else:
+                meta["时间"] = "每段前面的时间从开始有声音算起（电脑没有声音输出的空档不计时）"
             try:
                 self.transcript = TranscriptWriter(cfg.transcript_dir(), self.source.name, meta, session)
             except OSError:
@@ -157,7 +166,10 @@ class Interpreter:
         )
 
     def _on_asr(self, update: AsrUpdate) -> None:
-        self.translation.feed(update.committed, update.final)
+        # 给每个词标上它在音频流（也就是录音）里的大致位置。目前只知道“确认它的那次识别听到了哪里”，
+        # 这比它真正说出口的时刻晚一点，所以往前提 CONFIRM_LAG_S 秒
+        heard = max(0.0, update.audio_end - CONFIRM_LAG_S)
+        self.translation.feed(update.committed, update.final, [heard] * len(update.committed.split()))
         if not update.final:
             self.translation.speculate(update.partial)
         self._live = (self.translation.pending, update.partial)

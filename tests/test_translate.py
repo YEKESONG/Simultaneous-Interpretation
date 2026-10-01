@@ -60,6 +60,25 @@ def test_unit_builder_splits_at_sentences_and_long_clauses():
     assert b.add("afin de présenter", True) == ["afin de présenter"]  # 说完了，剩下的全送
 
 
+def test_unit_builder_keeps_the_time_of_each_units_first_word():
+    b = UnitBuilder()
+    assert b.add_timed("Bonjour à", False, [1.0, 1.4]) == []
+    # 一个单元可以跨好几次确认：时间取它第一个词的
+    assert b.add_timed("tous. Merci", False, [1.8, 3.5]) == [("Bonjour à tous.", 1.0)]
+    assert b.add_timed("beaucoup.", True, [3.9]) == [("Merci beaucoup.", 3.5)]
+    assert b.add_timed("Oui.", False, [1.0, 2.0]) == [("Oui.", None)]  # 时间和词数对不上：当作不知道
+    assert b.add("Non.", False) == ["Non."] and b.pending_times == []
+
+
+def test_stage_passes_word_times_to_units():
+    stage = TranslationStage(None, lambda unit: None)
+    units = stage.feed("Bonjour à tous. Merci", final=False, word_times=[1.0, 1.4, 1.8, 3.5])
+    units += stage.feed("beaucoup.", final=True, word_times=[3.9])
+    stage.close()
+    assert [(u.source, u.audio_start) for u in units] == [("Bonjour à tous.", 1.0), ("Merci beaucoup.", 3.5)]
+    assert stage.feed("Oui.", final=True)[0].audio_start is None  # 不给时间也照常工作
+
+
 class ScriptedTranslator:
     """记下每次请求的原文；gate 打开之前不返回任何字，用来控制时序。"""
 

@@ -122,6 +122,12 @@ def test_live_session_saves_a_recording_paired_with_its_transcript(session):
     usable = len(audio) // CHUNK_SAMPLES * CHUNK_SAMPLES
     assert np.array_equal(read_wav(recording), (audio[:usable] * 32767.0).astype("<i2"))
     assert not interpreter.recorder.active
+    # 记录里的时间是音频流（录音）里的位置，落在这段话开头之前一点，不受启动、加载模型花了多久的影响
+    first, second = view.units[0].audio_start, view.units[1].audio_start
+    assert 0.0 <= first <= TIMES[0][0] and TIMES[2][1] - 1.0 <= second <= TIMES[3][0]
+    text = transcript.read_text(encoding="utf-8")
+    assert "**[00:00]** Bonjour à tous." in text and "- 时间：" in text
+    assert f"**[00:0{int(second)}]** Merci beaucoup." in text
 
 
 def test_no_recording_when_switched_off_or_reading_from_a_file(session, tmp_path):
