@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import queue
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
 import numpy as np
@@ -42,6 +42,9 @@ class AudioSource:
         self._pending = np.zeros(0, dtype=np.float32)
         self._samples_emitted = 0
         self._lock = threading.Lock()
+        # 每取出一块音频，先交给它一份（录音保存用）。在调用 chunks() 的线程里执行，
+        # 所以它拿到的和后面的语音检测、识别拿到的是同一串音频，一块不多一块不少
+        self.on_chunk: Callable[[AudioChunk], None] | None = None
 
     def start(self) -> None:
         raise NotImplementedError
@@ -58,6 +61,8 @@ class AudioSource:
             item = self._queue.get()
             if item is None:
                 return
+            if self.on_chunk is not None:
+                self.on_chunk(item)
             yield item
 
     def _feed(self, samples: np.ndarray) -> None:

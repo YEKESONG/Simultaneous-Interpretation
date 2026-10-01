@@ -54,3 +54,7 @@ max_lines = 3              # 最多保留几对原文译文
 [transcript]
 enabled = true
 dir = "transcripts"        # 会话记录保存位置，可以写绝对路径
+
+[recording]
+enabled = true             # 内录时把听到的声音存一份 WAV，事后可以对照录音校对译文；只想这一次不录就加 --no-recording
+dir = "recordings"         # 录音保存位置，可以写绝对路径。16 kHz 单声道，每小时约 115 MB

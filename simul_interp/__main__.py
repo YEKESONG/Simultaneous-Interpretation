@@ -128,7 +128,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.ui:
         cfg.ui.mode = args.ui
     options = dict(
-        translate=not args.no_translate, mock_translate=args.mock_translate, save_transcript=not args.no_transcript
+        translate=not args.no_translate,
+        mock_translate=args.mock_translate,
+        save_transcript=not args.no_transcript,
+        save_recording=not args.no_recording,
     )
     if cfg.ui.mode == "overlay":
         from .ui.overlay import run_overlay
@@ -186,6 +189,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-translate", action="store_true", help="只识别不翻译")
     p.add_argument("--mock-translate", action="store_true", help="用模拟翻译（不联网），测试流程和界面")
     p.add_argument("--no-transcript", action="store_true", help="不保存会话记录")
+    p.add_argument("--no-recording", action="store_true", help="这一次不保存录音（内录时默认会存一份 WAV）")
     p.set_defaults(func=cmd_run)
 
     p = sub.add_parser("config", help="打印生效的配置")

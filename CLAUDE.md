@@ -23,4 +23,9 @@ Windows 部分（`audio/windows_loopback.py`、`asr/faster_whisper_backend.py`�
 每修一处照常单独提交，并在 DEVLOG 记录 Windows 上的实测结果。
 
 ## 不要提交
-`config.toml`、`.env`、任何音频文件、`transcripts/`、`bin/`。用户的真实录音只能在本地测试用，不能进仓库，也不能出现在 DEVLOG 里。
+`config.toml`、`.env`、任何音频文件、`transcripts/`、`recordings/`、`bin/`。用户的真实录音只能在本地测试用，不能进仓库，也不能出现在 DEVLOG 里。
+
+## 做真实内录测试之前
+内录是系统级的：用 `afplay` 播放测试音频时，用户自己正在运行的同传程序也会录到、显示并翻译它（S14 踩过）。
+播放之前先确认没有别的实例在跑（`pgrep -fl "simul_interp|si-audio-tap"`），测试的录音和记录写到临时目录
+（`--set recording.dir=… --set transcript.dir=…`），不要写进用户真实的录音文件夹。

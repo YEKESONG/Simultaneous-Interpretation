@@ -3,7 +3,7 @@
 [![tests](https://github.com/YEKESONG/Simultaneous-Interpretation/actions/workflows/tests.yml/badge.svg)](https://github.com/YEKESONG/Simultaneous-Interpretation/actions/workflows/tests.yml)
 
 内录电脑正在播放的声音（视频会议、视频网站），实时识别法语并翻译成中文，在一个透明悬浮窗里成对显示原文和译文。
-内录不会影响你听原声：戴耳机或者用扬声器都照常能听到。
+内录不会影响你听原声：戴耳机或者用扬声器都照常能听到。每次会话的原文、译文和一份录音都会保存下来，方便事后校对。
 
 > 当前状态：开发中。每个阶段的进度见下方清单，详细过程见 [docs/DEVLOG.md](docs/DEVLOG.md)。
 
@@ -41,6 +41,7 @@
 - [x] S12 实时识别改用 turbo（对比实验后由用户决定）
 - [x] S13 字幕窗改版：原文译文成对同步出现，不闪不跳
 - [x] S13b 当前句区域：暂定文字只在预留的空白里更新，译文填进留白
+- [x] S14 录音保存：内录时同步存一份 WAV，方便事后对照录音校对译文
 
 ## 开发环境
 
@@ -90,9 +91,18 @@ python -m venv .venv
 .venv/bin/python -m simul_interp run --ui console                  # 内录系统声音，终端显示
 .venv/bin/python -m simul_interp run --ui console --file 录音.m4a  # 用音频文件模拟
 .venv/bin/python -m simul_interp run --ui console --mock-translate # 不联网的模拟翻译，测试用
+.venv/bin/python -m simul_interp run --no-recording                # 这一次不保存录音
 ```
 
 每次会话的原文和译文会保存为 Markdown，位置由 `config.toml` 的 `[transcript] dir` 决定。
+
+内录时还会把听到的声音同步存成一份录音，方便事后对照录音校对译文：
+- 位置由 `[recording] dir` 决定，和会话记录同名：`同传_日期_时间.wav` 对应 `同传_日期_时间_译文.md`，记录的开头写着录音的路径；
+- 格式是 16 kHz 单声道 WAV（就是识别模型听到的那一路），每小时约 115 MB；
+- 边录边写：程序被强制退出、电脑死机，已经录下的部分也能正常播放（最多少最后 2 秒）；
+- 只录“电脑有声音输出”的时间段：没有任何程序在播放声音时，系统不送音频数据，这段空档不会录进去；
+- 不想录：在配置里设 `[recording] enabled = false`，或者只这一次加 `--no-recording`；
+- 录下别人的发言之前，请先征得对方同意。
 
 悬浮字幕窗的操作：
 - 底部是当前句区域（白色是已确认的原文，灰色是暂定的，下面留白等译文），上方是翻好的历史，越旧越暗；

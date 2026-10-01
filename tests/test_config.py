@@ -32,6 +32,16 @@ def test_toml_overrides_defaults(tmp_path):
     assert cfg.translate.glossary == {"IA": "人工智能"}
 
 
+def test_recording_defaults_and_overrides(tmp_path):
+    cfg = Config()
+    assert cfg.recording.enabled and cfg.recording_dir().name == "recordings"
+    apply_overrides(cfg, ["recording.enabled=false"])
+    assert cfg.recording.enabled is False
+    path = tmp_path / "config.toml"
+    path.write_text(f'[recording]\ndir = "{tmp_path.as_posix()}/录音"\n', encoding="utf-8")
+    assert load_config(path).recording_dir() == tmp_path / "录音"  # 绝对路径原样使用
+
+
 def test_unknown_key_is_rejected(tmp_path):
     path = tmp_path / "config.toml"
     path.write_text("[vad]\nmin_silense_ms = 300\n", encoding="utf-8")  # 故意拼错

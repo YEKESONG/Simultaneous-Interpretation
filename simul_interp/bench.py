@@ -143,7 +143,7 @@ def bench_pipeline(cfg: Config, path: Path, speed: float = 1.0, mock: bool = Fal
         return 1
     cfg.audio.source, cfg.audio.file, cfg.audio.file_speed = "file", str(path), speed
     view = RecordingView()
-    interpreter = Interpreter(cfg, view, mock_translate=mock, save_transcript=False)
+    interpreter = Interpreter(cfg, view, mock_translate=mock, save_transcript=False, save_recording=False)
     interpreter.backend.load()  # 和流水线里的识别在同一个线程（MLX 的要求）
     ref = reference_words(interpreter.backend, path, cfg.asr.model)
     ref_text = [w for _, _, w in ref]

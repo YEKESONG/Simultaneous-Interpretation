@@ -80,6 +80,14 @@ class TranscriptConfig:
 
 
 @dataclass
+class RecordingConfig:
+    # 内录时把听到的声音同步存成 WAV（16 kHz 单声道，每小时约 115 MB），事后可以对照录音校对译文。
+    # 用音频文件做输入时不录：文件本身就是录音
+    enabled: bool = True
+    dir: str = "recordings"  # 相对路径以项目根目录为基准
+
+
+@dataclass
 class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     vad: VadConfig = field(default_factory=VadConfig)
@@ -87,6 +95,7 @@ class Config:
     translate: TranslateConfig = field(default_factory=TranslateConfig)
     ui: UiConfig = field(default_factory=UiConfig)
     transcript: TranscriptConfig = field(default_factory=TranscriptConfig)
+    recording: RecordingConfig = field(default_factory=RecordingConfig)
 
     def api_key(self) -> str | None:
         if not self.translate.api_key_env:  # 本地 Ollama 之类不需要密钥的服务
@@ -95,6 +104,9 @@ class Config:
 
     def transcript_dir(self) -> Path:
         return resolve_path(self.transcript.dir)
+
+    def recording_dir(self) -> Path:
+        return resolve_path(self.recording.dir)
 
     def to_dict(self) -> dict:
         return asdict(self)
