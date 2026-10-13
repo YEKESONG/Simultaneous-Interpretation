@@ -17,8 +17,9 @@ from .asr.runner import AsrRunner
 from .asr.types import AsrUpdate
 from .audio import AudioChunk, create_source
 from .config import Config
+from .languages import language_name
 from .recording import WavRecorder
-from .transcript import TranscriptWriter
+from .transcript import TranscriptWriter, format_position
 from .translate import ChatTranslator, MockTranslator, TranslationStage, TranslationUnit
 
 logger = logging.getLogger(__name__)
@@ -49,11 +50,16 @@ class Interpreter:
         mock_translate: bool = False,
         save_transcript: bool = True,
         save_recording: bool = True,
+        start_paused: bool = False,
     ) -> None:
+        """start_paused：准备好之后先不监听，等调用 resume()（控制面板上的“开始监听”）。"""
         self.cfg = cfg
         self.view = view
+        self.state = "loading"  # loading（在准备）→ listening（在监听）⇄ paused（暂停）→ ended（结束）
         self.source = create_source(cfg)
         self.backend = create_backend(cfg)
+        if start_paused:
+            self.source.pause()
 
         self.translator: ChatTranslator | MockTranslator | None = None
         if mock_translate:
@@ -61,9 +67,11 @@ class Interpreter:
         elif translate:
             key = cfg.api_key()
             if key:
-                self.translator = ChatTranslator(cfg.translate, key)
+                self.translator = ChatTranslator(
+                    cfg.translate, key, source_language=language_name(cfg.asr.language)
+                )
             else:
-                logger.warning("没有设置翻译 API 密钥（%s），只显示法语原文", cfg.translate.api_key_env)
+                logger.warning("没有设置翻译 API 密钥（%s），只显示原文", cfg.translate.api_key_env)
         self.translation = TranslationStage(
             self.translator,
             self._on_unit,
@@ -99,7 +107,8 @@ class Interpreter:
             meta = {
                 "音源": self.source.name,
                 "识别模型": cfg.asr.model,
-                "识别语言": cfg.asr.language,
+                "识别语言": language_name(cfg.asr.language),
+                "译成": cfg.translate.target_language,
                 "翻译": translation,
             }
             if self.recorder is not None:
@@ -118,6 +127,7 @@ class Interpreter:
         # 几段译文并发进行，完成的先后不一定按顺序；会话记录要按原文顺序写
         self._finished: dict[int, TranslationUnit] = {}
         self._next_to_write = 0
+        self._notes: dict[int, list[str]] = {}  # 要插在某个翻译单元之前的说明（换语言、暂停后继续）
         self._write_lock = threading.Lock()
 
     def run(self) -> None:
@@ -127,8 +137,9 @@ class Interpreter:
                 self.view.on_status("正在连接翻译服务……")
                 self.translator.warm_up()
             self.view.on_status("正在加载识别模型……")
-            self.asr.run(self.source, on_started=lambda: self.view.on_status(""))
+            self.asr.run(self.source, on_started=self._on_started)
         finally:
+            self.state = "ended"
             self._close_recording()  # 先收好录音：后面等翻译收尾可能要几秒
             self.translation.close()
             if self.transcript is not None:
@@ -139,6 +150,56 @@ class Interpreter:
     def stop(self) -> None:
         self.asr.stop()
         self.source.stop()
+
+    def _on_started(self) -> None:
+        """模型加载好、音频源已经启动。"""
+        self.state = "paused" if self.source.paused else "listening"
+        self.view.on_status("已暂停，点“开始监听”开始" if self.source.paused else "")
+
+    # ---- 运行中的控制（控制面板在界面线程里调用） ----
+
+    def pause(self) -> None:
+        """暂停监听：不识别、不翻译，录音也跟着停。正说到一半的话会先收尾。"""
+        if self.state != "listening":
+            return
+        self.source.pause(self.cfg.vad.min_silence_ms / 1000 + 0.3)
+        self.state = "paused"
+        self.view.on_status("已暂停")
+
+    def resume(self) -> None:
+        if self.state != "paused":
+            return
+        if self.source.position > 0:  # 录音里没有暂停的那段时间，在记录里留个记号
+            self._note("暂停后从这里继续")
+        self.source.resume()
+        self.state = "listening"
+        self.view.on_status("")
+
+    def set_languages(self, source: str, target: str) -> None:
+        """运行中换语言，从下一句话开始生效。source 是识别语言的代码（如 "en"），target 是译文语言的名字。"""
+        if (source, target) == (self.cfg.asr.language, self.cfg.translate.target_language):
+            return
+        self.cfg.asr.language = source
+        self.cfg.translate.target_language = target  # 翻译的提示词每次请求时现读配置，改了就生效
+        self.asr.set_language(source)
+        if isinstance(self.translator, ChatTranslator):
+            self.translator.source_language = language_name(source)
+        self.translation.reset_context()  # 之前的句子是另一种语言的，不能再当上文
+        self._note(f"{language_name(source)} → {target}")
+        logger.info("语言改为：%s → %s", language_name(source), target)
+
+    def output_folders(self) -> list[Path]:
+        """这次会话的记录和录音所在的文件夹（去掉重复的）。"""
+        paths = [item.path.parent for item in (self.transcript, self.recorder) if item is not None]
+        return list(dict.fromkeys(paths))
+
+    def _note(self, text: str) -> None:
+        """在会话记录里插一行说明，位置在下一个翻译单元之前，并标上录音里的时间。"""
+        if self.transcript is None:
+            return
+        stamp = format_position(int(self.source.position))
+        with self._write_lock:
+            self._notes.setdefault(self.translation.next_id, []).append(f"{stamp} 起：{text}")
 
     def reconnect_audio(self) -> None:
         """切换输出设备后重新连接（Windows 需要手动；macOS 本来就会自动重连）。"""
@@ -191,5 +252,7 @@ class Interpreter:
             with self._write_lock:
                 self._finished[unit.id] = unit
                 while self._next_to_write in self._finished:
+                    for text in self._notes.pop(self._next_to_write, []):
+                        self.transcript.note(text)
                     self.transcript.add(self._finished.pop(self._next_to_write))
                     self._next_to_write += 1

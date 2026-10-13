@@ -52,6 +52,11 @@ class FileAudioSource(AudioSource):
             for block in itertools.chain(self._decode(), _split(tail)):
                 if self._stop.is_set():
                     break
+                if self.paused:  # 暂停时文件停在原地，继续后接着放（内录是把暂停期间的声音丢掉，文件没有这个必要）
+                    paused_at = now()
+                    while self.paused and not self._stop.is_set():
+                        time.sleep(0.02)
+                    started += now() - paused_at  # 暂停的时间不算进播放进度，继续后不会快进去追
                 if self.speed > 0:
                     # 等到这一块“播放完”的时刻再送出，和真实内录一样：声音总是播完才拿得到
                     due = started + (sent + len(block)) / SAMPLE_RATE / self.speed

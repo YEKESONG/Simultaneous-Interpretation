@@ -4,6 +4,8 @@
 假的识别后端靠幅度认词，所以每个词在音频里的确切位置是已知的。
 """
 
+import threading
+import time
 import wave
 
 import numpy as np
@@ -42,6 +44,25 @@ class FakeSource(AudioSource):
 
     def stop(self):
         pass
+
+
+class ManualSource(AudioSource):
+    """由测试自己一段一段地送音频。"""
+
+    name = "测试音源"
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
+
+
+def wait_for(condition, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while not condition() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return condition()
 
 
 class FakeVad:
@@ -105,13 +126,13 @@ def read_wav(path):
 @pytest.fixture
 def session(tmp_path, monkeypatch):
     """返回一个函数：按给定的选项建一个 Interpreter（内录、不翻译），输出都写到临时目录。"""
-    script = {"words": WORDS, "times": TIMES}
-    monkeypatch.setattr(pipeline, "create_source", lambda cfg: FakeSource(script["times"]))
+    script = {"words": WORDS, "times": TIMES, "source": None}
+    monkeypatch.setattr(pipeline, "create_source", lambda cfg: script["source"] or FakeSource(script["times"]))
     monkeypatch.setattr(pipeline, "create_backend", lambda cfg: LevelBackend(script["words"]))
     monkeypatch.setattr(runner, "SileroVad", FakeVad)
 
-    def make(cfg=None, words=WORDS, times=TIMES, **options):
-        script.update(words=words, times=times)
+    def make(cfg=None, words=WORDS, times=TIMES, source=None, **options):
+        script.update(words=words, times=times, source=source)
         cfg = cfg or Config()
         cfg.transcript.dir = str(tmp_path / "记录")
         cfg.recording.dir = str(tmp_path / "录音")
@@ -184,3 +205,54 @@ def test_unfinished_sentence_is_joined_with_its_continuation(session):
     interpreter, view = session(no_wait, words=HALTING_WORDS, times=HALTING_TIMES)
     interpreter.run()
     assert [view.units[i].source for i in sorted(view.units)] == ["Nous allons voir", "la suite."]
+
+
+def test_pause_ignores_what_is_said_and_resume_picks_up_again(session):
+    source = ManualSource()
+    interpreter, view = session(source=source)
+    worker = threading.Thread(target=interpreter.run)
+    worker.start()
+    audio = make_audio()  # 两句话，分别在第 1~2 秒和第 3.5~4.3 秒
+    first, second = audio[: 3 * SAMPLE_RATE], audio[3 * SAMPLE_RATE :]
+    assert wait_for(lambda: interpreter.state == "listening")
+    source._feed(first)
+    assert wait_for(lambda: 0 in view.units)  # “Bonjour à tous.”
+
+    interpreter.pause()
+    assert interpreter.state == "paused" and view.status[-1] == "已暂停"
+    position = source.position
+    source._feed(second)  # 暂停期间说的 “Merci beaucoup.”：不识别，也不录
+    time.sleep(0.2)
+    assert len(view.units) == 1 and source.position == position
+
+    interpreter.resume()
+    assert interpreter.state == "listening" and view.status[-1] == ""
+    source._feed(second)  # 继续之后再说一遍：照常出来
+    assert wait_for(lambda: 1 in view.units)
+    source._finish()
+    worker.join(5)
+    assert [view.units[i].source for i in sorted(view.units)] == ["Bonjour à tous.", "Merci beaucoup."]
+    assert interpreter.state == "ended"
+    text = interpreter.transcript.path.read_text(encoding="utf-8")
+    assert text.index("Bonjour à tous.") < text.index("暂停后从这里继续") < text.index("Merci beaucoup.")
+    # 录音里没有暂停的那一段，所以记录里的时间仍然对得上录音
+    assert len(read_wav(interpreter.recorder.path)) == round(source.position * SAMPLE_RATE)
+
+
+def test_starting_paused_waits_for_resume(session):
+    interpreter, view = session(start_paused=True)
+    interpreter.run()  # 这个假音源一启动就把音频全送完了，而这时还没点“开始监听”
+    assert view.units == {} and interpreter.recorder.seconds == 0
+    assert any("开始监听" in text for text in view.status)
+
+
+def test_languages_can_be_switched_at_run_time(session):
+    interpreter, view = session()
+    interpreter.set_languages("en", "English")
+    assert interpreter.backend.language == "en"  # 识别换成英语（模型是多语言的，不用重新加载）
+    assert interpreter.cfg.translate.target_language == "English"
+    interpreter.run()
+    text = interpreter.transcript.path.read_text(encoding="utf-8")
+    assert "*—— 00:00 起：英语 → English ——*" in text  # 记录里留一行说明
+    assert text.index("英语 → English") < text.index("Bonjour à tous.")
+    assert interpreter.output_folders() == [interpreter.transcript.path.parent, interpreter.recorder.path.parent]

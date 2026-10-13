@@ -51,6 +51,11 @@ class MlxWhisperBackend:
             self._quantize()
         self.transcribe(np.zeros(16000, dtype=np.float32))  # 预热：加载权重、编译 GPU 内核
 
+    def set_language(self, language: str) -> None:
+        """运行中换识别语言：模型是多语言的，不用重新加载，下一次识别就按新语言来。"""
+        self.language = language
+        self._tokenizer = None  # 分词器是按语言取的，换了语言要重新取
+
     def _quantize(self) -> None:
         """在内存里把权重量化成 8 位或 4 位：还是同一个模型，不下载任何东西。
         解码器生成每个 token 都要把全部权重读一遍，速度卡在内存带宽上，权重变小就更快。"""

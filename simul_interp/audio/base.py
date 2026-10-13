@@ -41,6 +41,7 @@ class AudioSource:
         self._queue: queue.Queue[AudioChunk | None] = queue.Queue()
         self._pending = np.zeros(0, dtype=np.float32)
         self._samples_emitted = 0
+        self._paused = False
         self._lock = threading.Lock()
         # 每取出一块音频，先交给它一份（录音保存用）。在调用 chunks() 的线程里执行，
         # 所以它拿到的和后面的语音检测、识别拿到的是同一串音频，一块不多一块不少
@@ -55,6 +56,32 @@ class AudioSource:
     def reconnect(self) -> None:
         """重新连接音频设备（切换输出设备之后）。默认什么也不做。"""
 
+    @property
+    def paused(self) -> bool:
+        return self._paused
+
+    @property
+    def position(self) -> float:
+        """已经送出了多少秒音频，也就是音频流（和录音）现在走到了哪里。"""
+        return self._samples_emitted / SAMPLE_RATE
+
+    def pause(self, flush_s: float = 0.7) -> None:
+        """暂停：之后送来的音频一律丢掉。音频流的时间也跟着停住，所以录音里没有这段空白，
+        会话记录里的时间和录音位置不会因为暂停而错开。
+
+        暂停前先补 flush_s 秒静音：正说到一半的话要靠这段静音，语音检测才能判定“说完了”，
+        否则这半句会一直悬着，等到继续之后才出来。"""
+        if self._paused:
+            return
+        if flush_s > 0 and self._samples_emitted > 0:
+            self._feed(np.zeros(int(flush_s * SAMPLE_RATE), dtype=np.float32))
+        with self._lock:
+            self._paused = True
+            self._pending = np.zeros(0, dtype=np.float32)
+
+    def resume(self) -> None:
+        self._paused = False
+
     def chunks(self) -> Iterator[AudioChunk]:
         """阻塞地逐块产出音频，音频源结束或 stop() 之后退出。"""
         while True:
@@ -68,6 +95,8 @@ class AudioSource:
     def _feed(self, samples: np.ndarray) -> None:
         received = now()
         with self._lock:
+            if self._paused:
+                return
             pending = np.concatenate([self._pending, np.asarray(samples, dtype=np.float32)])
             count = len(pending) // CHUNK_SAMPLES
             for i in range(count):

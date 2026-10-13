@@ -58,8 +58,16 @@ class TranslationError(RuntimeError):
 
 
 class ChatTranslator:
-    def __init__(self, cfg: TranslateConfig, api_key: str, transport: httpx.BaseTransport | None = None) -> None:
+    def __init__(
+        self,
+        cfg: TranslateConfig,
+        api_key: str,
+        transport: httpx.BaseTransport | None = None,
+        source_language: str = "法语",
+    ) -> None:
+        """source_language：原文是什么语言（中文名，写进提示词里）；运行中换语言时直接改这个属性。"""
         self.cfg = cfg
+        self.source_language = source_language
         self._client = httpx.Client(
             base_url=cfg.base_url.rstrip("/"),
             headers={"Authorization": f"Bearer {api_key}"},
@@ -84,7 +92,7 @@ class ChatTranslator:
 
     def system_prompt(self) -> str:
         lines = [
-            f"你是专业的同声传译员，把法语实时翻译成{self.cfg.target_language}。",
+            f"你是专业的同声传译员，把{self.source_language}实时翻译成{self.cfg.target_language}。",
             "要求：",
             "- 只输出译文，不要解释，不要加引号，不要重复原文。",
             "- 原文来自实时语音识别，可能是半句话、有识别错误或标点不准：按最合理的意思翻译，不要补充原文没有的内容。",
@@ -299,6 +307,17 @@ class TranslationStage:
         """已经确认、但还没凑够送去翻译的原文。"""
         with self._lock:
             return " ".join(self.builder.pending)
+
+    @property
+    def next_id(self) -> int:
+        """下一个翻译单元会用的编号。"""
+        with self._lock:
+            return self._next_id
+
+    def reset_context(self) -> None:
+        """丢掉翻译时附带的上文（换语言之后，之前的句子是另一种语言的，不能再当上文）。"""
+        with self._lock:
+            self._context.clear()
 
     @property
     def speculative_translation(self) -> str:

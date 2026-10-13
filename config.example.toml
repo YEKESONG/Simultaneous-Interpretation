@@ -14,7 +14,7 @@ speech_pad_ms = 200        # 句首往前多留一点音频，避免吞掉第一
 [asr]
 backend = "auto"           # auto：macOS 用 mlx，Windows 用 faster-whisper
 model = "mlx-community/whisper-large-v3-turbo"   # 实时同传用 turbo（音频文件转写仍只用完整版 large-v3）
-language = "fr"
+language = "fr"            # 要识别的语言：fr 法语、en 英语、es 西班牙语、de 德语、it 意大利语、pt 葡萄牙语；运行中可以在控制面板上换
 step_s = 0.6               # 说话期间每隔多久重新识别一次
 max_buffer_s = 12.0        # 识别缓冲区的上限，超过就强制切分
 quantize_bits = 0          # macOS：在内存里量化成 8 或 4 位（0 = 不量化）；turbo 不需要
@@ -51,6 +51,7 @@ font_size = 22             # 译文（中文）字号
 source_font_ratio = 0.82   # 原文字号 = 译文字号 × 这个比例
 opacity = 0.6              # 背景不透明度
 scrollback = 500           # 字幕窗里留多少对原文译文供往回翻看（滚轮或右侧滑动条）
+autostart = true           # 启动后马上开始监听；false = 先停着，等在控制面板上点“开始监听”
 
 [transcript]
 enabled = true

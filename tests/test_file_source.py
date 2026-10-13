@@ -1,3 +1,5 @@
+import time
+
 import numpy as np
 
 from simul_interp.audio.base import CHUNK_SAMPLES, SAMPLE_RATE
@@ -39,3 +41,18 @@ def test_realtime_pacing(tmp_path):
     assert 0.45 < elapsed < 0.8
     for chunk in chunks:
         assert chunk.received_at - started >= chunk.end - 0.01
+
+
+def test_paused_file_waits_and_then_plays_everything(tmp_path):
+    """用文件模拟时，暂停是让文件停在原地，继续后接着放，一点不丢（内录才是把暂停期间的声音丢掉）。"""
+    wav = tmp_path / "tone.wav"
+    make_tone(wav, 0.3)
+    source = FileAudioSource(wav, speed=1.0, tail_silence_s=0.0)
+    source.pause()
+    source.start()
+    time.sleep(0.25)
+    assert source.position == 0  # 暂停着：一块都没送
+    source.resume()
+    chunks = list(source.chunks())
+    source.stop()
+    assert sum(len(c.samples) for c in chunks) == (int(0.3 * SAMPLE_RATE) // CHUNK_SAMPLES) * CHUNK_SAMPLES

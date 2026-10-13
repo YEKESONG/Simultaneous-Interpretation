@@ -22,6 +22,8 @@ from .types import AsrBackend, AsrUpdate
 
 logger = logging.getLogger(__name__)
 
+_RESET = object()  # 放进事件队列的记号：换了识别语言，之前攒下的上文提示作废
+
 
 class AsrRunner:
     def __init__(
@@ -41,6 +43,15 @@ class AsrRunner:
 
     def stop(self) -> None:
         self._stop.set()
+
+    def set_language(self, language: str) -> None:
+        """运行中换识别语言（可以在任何线程调用），从下一次识别开始生效。模型是多语言的，不用重新加载。"""
+        change = getattr(self.backend, "set_language", None)
+        if change is not None:
+            change(language)
+        else:
+            self.backend.language = language
+        self._events.put(_RESET)  # 上文提示是用旧语言写的，交给识别线程去清掉
 
     def run(self, source: AudioSource, on_started: Callable[[], None] | None = None) -> None:
         """阻塞运行，直到音频源结束或调用了 stop()。模型加载好、开始收听时调用 on_started。"""
@@ -90,6 +101,9 @@ class AsrRunner:
             for event in batch:
                 if event is None:
                     return
+                if event is _RESET:
+                    transcriber.history = []
+                    continue
                 if event.type == "start":
                     transcriber.start_utterance(event.time)
                     in_speech = True

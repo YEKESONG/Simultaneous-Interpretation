@@ -76,6 +76,7 @@ class UiConfig:
     source_font_ratio: float = 0.82  # 原文字号 = 译文字号 × 这个比例（两者别差太多，方便对照）
     opacity: float = 0.6  # 悬浮窗背景不透明度
     scrollback: int = 500  # 悬浮窗里留多少对原文译文供往回翻看（更早的在会话记录里）
+    autostart: bool = True  # 启动后是否马上开始监听；False = 先停着，等在控制面板上点“开始监听”
 
 
 @dataclass

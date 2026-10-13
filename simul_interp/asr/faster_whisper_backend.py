@@ -56,6 +56,10 @@ class FasterWhisperBackend:
             ) from exc
         self.transcribe(np.zeros(16000, dtype=np.float32))  # 预热
 
+    def set_language(self, language: str) -> None:
+        """运行中换识别语言：模型是多语言的，不用重新加载，下一次识别就按新语言来。"""
+        self.language = language
+
     def transcribe(
         self, audio: np.ndarray, prompt: str = "", word_timestamps: bool = False, max_tokens: int | None = None
     ) -> list[Segment]:

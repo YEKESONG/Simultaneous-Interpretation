@@ -47,6 +47,10 @@ class TranscriptWriter:
         self._write(f"**[{stamp}]** {unit.source}\n\n> {translation}\n\n")
         self._count += 1
 
+    def note(self, text: str) -> None:
+        """在记录里插一行说明（比如中途换了语言、暂停过）。"""
+        self._write(f"*—— {text} ——*\n\n")
+
     def close(self) -> None:
         self._write(f"---\n\n共 {self._count} 句，结束时间：{time.strftime('%Y-%m-%d %H:%M:%S')}\n")
 

@@ -40,6 +40,7 @@ def test_stream_parses_sse_and_sends_expected_body():
     assert body["model"] == "deepseek-flash" and body["stream"] is True
     assert body["thinking"] == {"type": "disabled"}  # DeepSeek 默认开思考模式，同传必须关掉
     assert "IA → 人工智能" in body["messages"][0]["content"]
+    assert "把法语实时翻译成简体中文" in body["messages"][0]["content"]
     assert "Phrase précédente." in body["messages"][1]["content"]
     assert body["messages"][1]["content"].endswith("Bonjour à tous.")
 
@@ -265,3 +266,31 @@ def test_waiting_fragment_is_translated_ahead_of_time(monkeypatch):
     stage.close()
     assert translator.calls == ["et ensuite nous"] and seen[0].speculative  # 只请求了一次
     assert stage.stats == {"speculated": 1, "adopted": 1}
+
+
+def test_prompt_follows_the_languages_chosen_at_run_time():
+    seen = []
+
+    def handler(request):
+        seen.append(json.loads(request.content)["messages"][0]["content"])
+        return httpx.Response(200, content=sse("ok"), headers={"content-type": "text/event-stream"})
+
+    translator = make_translator(handler)
+    translator.source_language = "英语"  # 运行中换语言：改这两处，下一次请求就生效
+    translator.cfg.target_language = "Français"
+    list(translator.stream("Good morning."))
+    assert "把英语实时翻译成Français" in seen[0]
+
+
+def test_context_can_be_dropped_when_the_language_changes():
+    translator = ScriptedTranslator()
+    contexts = []
+    original = translator.stream
+    translator.stream = lambda source, context=None: (contexts.append(list(context)), original(source, context))[1]
+    stage = TranslationStage(translator, lambda unit: None)
+    stage.feed("Bonjour à tous.", final=True)
+    stage.reset_context()  # 之前的句子是另一种语言的，不能再当上文
+    assert stage.next_id == 1
+    stage.feed("Good morning.", final=True)
+    stage.close()
+    assert contexts == [[], []]
