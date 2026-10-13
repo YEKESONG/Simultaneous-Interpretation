@@ -14,6 +14,10 @@
 
 另外 Whisper 在音频很短时容易“编下去”（比如把提示词里的上一句接着复述一遍），
 所以对识别结果加了语速上限：每秒最多 MAX_WORDS_PER_S 个词，超出的部分直接截掉。
+
+还有一种幻觉靠时长、音量都拦不住：有声音但听不出内容时（键盘声、提示音、远处含糊的人声），语音检测
+认为有人在说话，Whisper 就编一句 “Merci.”。这句话真人也会说，所以整个结果只有它的时候，回头问
+识别模型对这个词到底有多大把握（_is_made_up），把握不够就不显示、不确认，并把这段声音从缓冲区里扔掉。
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ import numpy as np
 
 from ..audio.base import SAMPLE_RATE
 from ..clock import now
+from .common import is_filler
 from .types import AsrBackend, AsrUpdate, Segment
 
 _NON_WORD = re.compile(r"[^\w'’-]+")
@@ -36,6 +41,11 @@ MIN_NEW_SPEECH_S = 0.3  # 上一次识别之后又说了不到这么久（且之
 # 切过缓冲区之后，被 VAD 标为说话的总时长不到这么多，就当作上一句的尾巴：一句话说完后，
 # VAD 的说话概率要滞后 0.1~0.3 秒才降下去，切开后的缓冲区开头常常只有这点尾巴（实测对着它幻觉出 “chaîne.”）
 POST_TRIM_MIN_SPEECH_S = 0.4
+# 整个结果只有一句 “Merci.” 时，模型认为“第一个词是 merci”的概率低于这个值，就当作对着杂音编的。
+# 实测（DEVLOG S15）：录音里真人说的多在 0.9 以上（个别一次 0.75），10 种合成声音 0.87~1.00；杂音上编出来的 94% 低于 0.6。
+# 杂音上这个概率很不稳定（缓冲区挪几毫秒就能差 0.3），所以每一次识别都重新核实，不沿用上一次的结论
+MIN_FILLER_PROB = 0.7
+DISCARD_KEEP_S = 0.2  # 扔掉被判为杂音的那段声音时，最后留这么多：万一这时正好有人开口，开头不会被切掉
 _CLAUSE_END = re.compile(r"[,;:.?!…][\"'»”)]*$")
 
 
@@ -137,6 +147,8 @@ class StreamingTranscriber:
         self.prompt_min_audio_s = prompt_min_audio_s
         self.min_audio_s = min_audio_s
         self.history: list[str] = []  # 缓冲区之前已确认的词，用作下一次识别的提示词
+        # 后端可以不提供这个方法（比如测试用的假后端），那就不核实，和以前一样
+        self._word_probability = getattr(backend, "word_probability", None)
         self._reset(0.0)
 
     # ---- 状态 ----
@@ -152,6 +164,7 @@ class StreamingTranscriber:
         self.last_pass_end = start  # 上一次识别覆盖到的音频流时间
         self.new_audio_s = 0.0  # 自上一次识别以来新增的音频时长
         self._after_trim = False
+        self._made_up = 0  # 连续几次识别的结果被判为“对着杂音编的”
 
     @property
     def buffer_s(self) -> float:
@@ -218,6 +231,27 @@ class StreamingTranscriber:
         limit = int(self.buffer_s * MAX_WORDS_PER_S) + 3  # 语速上限，截掉“编出来”的部分
         return segments, strip_repetition(hyp[:limit]), ends, times
 
+    def _is_made_up(self, hyp: list[str], covered: int) -> bool:
+        """整个结果只有一句 “Merci.” 时，向识别模型核实它是不是对着杂音编的。
+
+        只在缓冲区里没有别的内容时核实（没有已确认的词，开头也不是上一句的重复）：
+        核实的是“这段音频的第一个词是不是 merci”，前面还有别的话就不是这个问题了。"""
+        if covered or self.committed or self._word_probability is None or not is_filler(hyp):
+            return False
+        return self._word_probability(self.buffer, norm(hyp[0])) < MIN_FILLER_PROB
+
+    def _drop_made_up(self, started: float) -> AsrUpdate:
+        """这一次的结果是编的：不显示、不确认。连着两次都是（和确认一个词一样，要两次一致），
+        就把这段声音扔掉——留在缓冲区里，下一次还会再编，后面真有人说话时还会被它带偏。"""
+        self.tail = []
+        self.last_pass_end = self.buffer_end
+        self.new_audio_s = 0.0
+        self._made_up += 1
+        if self._made_up >= 2:
+            self._made_up = 0
+            self._cut(self.buffer_s - DISCARD_KEEP_S, [])
+        return AsrUpdate("", "", False, self.last_pass_end, now() - started, now())
+
     def process(self) -> AsrUpdate | None:
         """说话期间调用：重新识别整个缓冲区，确认和上一次一致的部分。"""
         if self.buffer_s < self.min_audio_s:
@@ -229,6 +263,9 @@ class StreamingTranscriber:
         segments, hyp, ends, times = self._recognize(word_timestamps=self.buffer_s > self.soft_buffer_s)
         covered = self._covered(hyp)
         self._after_trim = False
+        if self._is_made_up(hyp, covered):
+            return self._drop_made_up(started)
+        self._made_up = 0
         new = hyp[covered:]
         agreed = common_prefix(new, self.tail)
         newly = new[:agreed]
@@ -262,16 +299,19 @@ class StreamingTranscriber:
             unheard = speech_end - max(self.buffer_start, self.last_pass_end)  # 上一次识别之后又说了多久
             if self.last_pass_end >= speech_end + 0.1 and (self.tail or self.committed):
                 words = self.tail  # 上一次识别已经覆盖到说话结束，直接确认，省一次识别
-            elif unheard < MIN_NEW_SPEECH_S and not self.tail:
+            elif unheard < MIN_NEW_SPEECH_S and not self.tail and not self._made_up:
                 # 上一次听到的内容已经全部确认，之后几乎没再说话：不再识别。
-                # 对着剩下的静音识别，Whisper 会“补”出一句（实测 “Merci.”、“chaîne.”），而且这次不经过两次一致的检验
+                # 对着剩下的静音识别，Whisper 会“补”出一句（实测 “Merci.”、“chaîne.”），而且这次不经过两次一致的检验。
+                # 例外：上一次的结果被判为编的（_made_up）。那一次可能只是词还没说完、模型把握不够，
+                # 现在整句都在缓冲区里了，再识别、再核实一次，免得把真的 “Merci.” 丢掉
                 words = []
             else:
                 # 句尾那段静音会诱发 Whisper “补”一句，所以先把缓冲区截到停止说话后 0.1 秒
                 keep = int(max(0.0, speech_end + 0.1 - self.buffer_start) * SAMPLE_RATE)
                 self.buffer = self.buffer[:keep]
                 _, hyp, _, _ = self._recognize()
-                words = hyp[self._covered(hyp) :]
+                covered = self._covered(hyp)
+                words = [] if self._is_made_up(hyp, covered) else hyp[covered:]
         self.history = (self.history + self.committed + words)[-HISTORY_WORDS:]
         self._reset(end)
         return AsrUpdate(

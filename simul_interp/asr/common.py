@@ -13,6 +13,20 @@ HALLUCINATIONS = re.compile(
 )
 
 
+# 另一类幻觉不能直接丢：Whisper 在“有声音但听不出内容”的时候（键盘声、提示音、远处含糊的人声），
+# 最常编出来的是一句 “Merci.”——这句话真人也常说（下课时学生就会说）。所以只在整个结果除了它
+# 什么都没有的时候，回头向识别模型核实一次（见 StreamingTranscriber._is_made_up）。
+_FILLER = re.compile(r"merci(?: merci)*")
+_NOT_LETTER = re.compile(r"[^\w\s]+")
+
+
+def is_filler(words: list[str]) -> bool:
+    """这几个词是不是只有 “Merci.”（可以连着重复几遍）。“Merci beaucoup.”“Merci à tous.” 不算：
+    实测被编出来的只有单独的 “Merci.”，后面还跟着别的词时，那些词本身就是佐证。"""
+    text = " ".join(_NOT_LETTER.sub(" ", " ".join(words)).lower().split())
+    return bool(_FILLER.fullmatch(text))
+
+
 def merge_word_pieces(raw_words: Iterable[tuple[float, float, str]]) -> list[tuple[float, float, str]]:
     """Whisper 的逐词输出会把法语的省音和连字符拆开：d'être → “d” + “'être”，Est-ce → “Est” + “-ce”。
     真正的新词都以空格开头，所以没有前导空格的片段并回前一个词，和 text.split() 的分词保持一致。

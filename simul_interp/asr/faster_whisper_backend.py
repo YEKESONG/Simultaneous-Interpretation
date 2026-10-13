@@ -79,3 +79,25 @@ class FasterWhisperBackend:
             raw = [(w.start, w.end, w.word) for w in (s.words or [])]
             result.append(Segment(float(s.start), float(s.end), text, merge_word_pieces(raw)))
         return result
+
+    def word_probability(self, audio: np.ndarray, word: str) -> float:
+        """模型认为这段音频的第一个词就是 word 的概率（含义见 MlxWhisperBackend.word_probability）。
+
+        faster-whisper 的逐词时间戳里自带每个词的概率，算法相同，所以带着逐词时间戳重新识别一次、
+        取第一个词的；第一个词不是 word 就返回 0。比 MLX 那边的做法慢（要完整解码一遍）。
+        和这个文件的其余部分一样，没有在 Windows 实机上运行过。"""
+        segments, _ = self._model.transcribe(
+            audio,
+            language=self.language,
+            task="transcribe",
+            beam_size=1,
+            temperature=0.0,
+            condition_on_previous_text=False,
+            word_timestamps=True,
+            vad_filter=False,
+        )
+        for s in segments:
+            for w in s.words or []:
+                same = "".join(c for c in w.word.lower() if c.isalnum()) == word.lower()
+                return float(w.probability) if same else 0.0
+        return 0.0

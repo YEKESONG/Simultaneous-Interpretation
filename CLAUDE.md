@@ -20,6 +20,7 @@ Windows 部分（`audio/windows_loopback.py`、`asr/faster_whisper_backend.py`�
 3. 识别模型：faster-whisper 的 large-v3-turbo 约 1.6 GB（和 Mac 上一样用 turbo），**下载前先问用户**，同意后在 `config.toml` 里设 `[asr] allow_download = true`。有 NVIDIA 显卡时确认用上了 CUDA（没有显卡的话很难做到实时，要和用户商量）。
 4. 延迟：把 Mac 上用 `scripts/make_test_audio.py` 生成的 `samples/` 拷过来（合成语音不能进公开仓库），跑 `python -m simul_interp bench-asr samples/fr_meeting.wav`，和 DEVLOG 里 Mac 的数据对比。
 5. 悬浮窗：`python -m simul_interp run --mock-translate --file samples/fr_meeting.wav`，确认透明、置顶、不抢焦点，拖动和右键菜单可用，全屏视频上能看到；插拔耳机后用“重新连接音频设备”。
+6. 杂音：S15 加的 `FasterWhisperBackend.word_probability`（核实单独一句的 “Merci.” 是不是对着杂音编的）同样没在真机跑过。播放一段没人说话、只有键盘声或提示音的音频，确认不会一句接一句地出 “Merci.”；再播放一句真的 “Merci.”，应该照常出来。不对的话先看这个方法返回的概率：真的应该在 0.9 上下，杂音上多半不到 0.5。
 每修一处照常单独提交，并在 DEVLOG 记录 Windows 上的实测结果。
 
 ## 不要提交

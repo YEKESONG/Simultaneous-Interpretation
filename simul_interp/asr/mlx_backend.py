@@ -37,6 +37,7 @@ class MlxWhisperBackend:
         self.quantize_bits = quantize_bits
         self._path: str | None = None
         self._transcribe = None
+        self._tokenizer = None
 
     def load(self) -> None:
         if self._transcribe is not None:
@@ -87,4 +88,34 @@ class MlxWhisperBackend:
             raw = [(w["start"], w["end"], w["word"]) for w in s.get("words", [])]
             segments.append(Segment(float(s["start"]), float(s["end"]), text, merge_word_pieces(raw)))
         return segments
+
+    def word_probability(self, audio: np.ndarray, word: str) -> float:
+        """只听这段音频、一个字都还没写的时候，模型认为第一个词就是 word 的概率（大小写两种写法都算）。
+
+        用来核实 “Merci.” 这种一句话的结果是真听到的还是编的：真的有人说时这个概率在 0.9 上下，
+        对着杂音编出来时多半不到 0.5（DEVLOG S15）。transcribe 返回的置信度分不出这两种情况——
+        avg_logprob 把时间戳 token 的不确定也平均了进去，turbo 的 no_speech_prob 则恒为 1e-11 左右。
+        代价是多跑一次编码器，和识别一次差不多（约 0.35 秒）。"""
+        import mlx.core as mx
+        from mlx_whisper.audio import N_FRAMES, N_SAMPLES, log_mel_spectrogram, pad_or_trim
+        from mlx_whisper.tokenizer import get_tokenizer
+        from mlx_whisper.transcribe import ModelHolder
+
+        model = ModelHolder.get_model(self._path, mx.float16)
+        if self._tokenizer is None:
+            self._tokenizer = get_tokenizer(
+                model.is_multilingual, num_languages=model.num_languages, language=self.language, task="transcribe"
+            )
+        tokenizer = self._tokenizer
+        mel = log_mel_spectrogram(audio, n_mels=model.dims.n_mels, padding=N_SAMPLES)
+        features = model.encoder(pad_or_trim(mel, N_FRAMES, axis=-2).astype(mx.float16)[None])
+        # 和逐词时间戳里的“词的概率”同一种算法：不带时间戳，把这个词的 token 喂进去，看模型给每个 token 多大概率
+        prefix = [*tokenizer.sot_sequence, tokenizer.no_timestamps]
+        total = 0.0
+        for variant in {word.lower(), word.capitalize()}:
+            tokens = tokenizer.encode(" " + variant)
+            logits = model.decoder(mx.array([prefix + tokens[:-1]]), features)[0][0, len(prefix) - 1 :]
+            probs = mx.softmax(logits.astype(mx.float32), axis=-1)
+            total += float(np.prod([float(probs[i, token]) for i, token in enumerate(tokens)]))
+        return total
 

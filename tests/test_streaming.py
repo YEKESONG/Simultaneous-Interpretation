@@ -1,15 +1,16 @@
 import numpy as np
 
-from simul_interp.asr.streaming import StreamingTranscriber, align_prefix, repeated_head, strip_repetition
+from simul_interp.asr.common import is_filler
+from simul_interp.asr.streaming import StreamingTranscriber, align_prefix, norm, repeated_head, strip_repetition
 from simul_interp.asr.types import Segment
 from simul_interp.audio.base import SAMPLE_RATE
 
 SCRIPT = "Bonjour à tous. Nous allons parler de l'intelligence artificielle. Merci beaucoup."
 
 
-def timeline(text, word_s=0.3, gap_s=0.05):
+def timeline(text, word_s=0.3, gap_s=0.05, start=0.2):
     """给剧本里的每个词排上时间：每个词 0.3 秒，词间隔 0.05 秒。"""
-    words, t = [], 0.2
+    words, t = [], start
     for w in text.split():
         words.append((t, t + word_s, w))
         t += word_s + gap_s
@@ -57,6 +58,28 @@ class FakeBackend:
     @staticmethod
     def _segment(items, word_timestamps):
         return Segment(items[0][0], items[-1][1], " ".join(w for _, _, w in items), items if word_timestamps else [])
+
+
+class CheckingBackend(FakeBackend):
+    """另外提供 word_probability（真的后端都有）：这段音频里听到的第一个词确实是它，才给高概率。"""
+
+    def __init__(self, words, hallucinate_on_silence=True, settle_s=0.0):
+        super().__init__(words, hallucinate_on_silence)
+        self.checks = 0
+        self.settle_s = settle_s  # 词说完之后还要再听到这么久，模型才有把握（模拟“词刚说完时把握还不够”）
+
+    def word_probability(self, audio, word):
+        self.checks += 1
+        t0 = self.transcriber.buffer_start
+        heard = [w for s, e, w in self.words if s >= t0 - 0.01 and e + self.settle_s <= t0 + len(audio) / SAMPLE_RATE]
+        return 0.95 if heard and norm(heard[0]) == word else 0.2
+
+
+def make_checking(words, **kwargs):
+    backend = CheckingBackend(words, **kwargs)
+    transcriber = StreamingTranscriber(backend)
+    backend.transcriber = transcriber
+    return backend, transcriber
 
 
 def make(words, **kwargs):
@@ -244,3 +267,80 @@ def test_force_trim_when_no_sentence_end():
         assert t.buffer_s < 6.0 + 1.0  # 缓冲区不会无限增长
     committed += t.finish(words[-1][1]).committed.split()
     assert len(committed) == 60
+
+
+def test_is_filler():
+    for text in ("Merci.", "merci", "Merci !", "Merci. Merci."):
+        assert is_filler(text.split()), text
+    for text in ("Merci beaucoup.", "Merci à tous.", "Merci, au revoir.", "Oui, merci.", "Merci d'être venus", ""):
+        assert not is_filler(text.split()), text
+
+
+def test_merci_made_up_on_noise_is_never_shown_or_committed():
+    """实测问题（S15）：没人说话、只有杂音的时段，语音检测认为有人在说话（概率很高，持续好几秒），
+    Whisper 每次都识别成 “Merci.”，两次一致就确认了——一分多钟里出了十几句。"""
+    backend, t = make_checking([])  # 剧本里一个词都没有：整段都是杂音
+    t.start_utterance(0.0)
+    shown, longest = [], 0.0
+    for _ in range(8):  # 4.8 秒，语音检测一直标成“在说话”
+        feed(t, 0.6)
+        update = t.process()
+        shown.append((update.committed, update.partial))
+        longest = max(longest, t.buffer_s)
+    final = t.finish(speech_end=4.8)
+    assert all(committed == "" and partial == "" for committed, partial in shown)  # 既不确认，也不当暂定文字显示
+    assert final.committed == "" and t.history == []
+    assert backend.calls >= 6 and backend.checks >= 6  # 每次都识别出了 “Merci.”，每次都去核实了
+    assert longest < 1.5  # 连着两次都是编的，就把这段声音扔掉，缓冲区不会越攒越长
+
+
+def test_merci_made_up_in_the_final_pass_is_dropped():
+    backend, t = make_checking([])
+    t.start_utterance(0.0)
+    feed(t, 0.6)
+    assert t.process().partial == ""
+    feed(t, 0.5)  # 上一次识别之后又“说”了 0.5 秒，说完时要再识别一次
+    calls = backend.calls
+    final = t.finish(speech_end=1.1)
+    assert backend.calls == calls + 1  # 确实做了最后一次识别
+    assert final.committed == ""  # 结果还是编的 “Merci.”：不确认
+
+
+def test_real_merci_is_kept():
+    backend, t = make_checking(timeline("Merci."), hallucinate_on_silence=False)  # 0.2~0.5 秒真的有人说了 Merci.
+    t.start_utterance(0.0)
+    feed(t, 0.62)
+    first = t.process()
+    assert first.partial == "Merci." and backend.checks == 1  # 核实通过：照常先当暂定文字显示
+    feed(t, 0.2, speech=False)
+    second = t.process()
+    assert second.committed == "Merci."  # 两次一致，照常确认
+    assert t.finish(speech_end=0.5).committed == ""
+    assert t.history == ["Merci."]
+
+
+def test_real_merci_rejected_too_early_gets_a_second_look_at_the_end():
+    """词刚说完就识别的那一次，模型把握还不够，被判成了编的；接着识别线程正忙，没有再识别就到了“说完”。
+    这时不能直接丢：要对着完整的一句再识别、再核实一次。"""
+    backend, t = make_checking(timeline("Merci."), hallucinate_on_silence=False, settle_s=0.05)
+    t.start_utterance(0.0)
+    feed(t, 0.52)  # “Merci.” 在 0.5 秒说完
+    assert t.process().partial == "" and backend.checks == 1  # 第一次核实没通过，先不显示
+    feed(t, 0.4, speech=False)
+    final = t.finish(speech_end=0.5)
+    assert backend.checks == 2 and final.committed == "Merci."
+
+
+def test_speech_right_after_discarded_noise_is_not_lost():
+    words = timeline("Bonjour à tous.", start=1.5)  # 先是 1.3 秒左右的杂音，紧接着（同一句里）真的有人说话
+    backend, t = make_checking(words)
+    t.start_utterance(0.0)
+    committed, shown = [], []
+    for until in (0.6, 1.2, 1.8, 2.4, 2.52):  # “tous.” 在 2.5 秒说完
+        feed(t, until - t.buffer_end)
+        update = t.process()
+        committed += update.committed.split()
+        shown.append(update.partial)
+    assert shown[:2] == ["", ""] and t.buffer_start > 0.5  # 前两次都是编的 Merci.：不显示，杂音那段被扔掉
+    committed += t.finish(speech_end=words[-1][1]).committed.split()
+    assert committed == "Bonjour à tous.".split()  # 后面的话一个词不少，也没有多出 Merci.

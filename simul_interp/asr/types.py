@@ -27,6 +27,9 @@ class AsrBackend(Protocol):
     ) -> list[Segment]:
         """max_tokens：最多生成多少个 token，防止陷入重复循环时一直生成、解码时间暴涨。"""
 
+    # 可选：word_probability(audio, word) -> float，模型认为这段音频的第一个词就是 word 的概率。
+    # 流式识别用它核实 “Merci.” 这类容易被编出来的一句话；后端没有这个方法时就不核实。
+
 
 @dataclass
 class AsrUpdate:

@@ -23,8 +23,8 @@ def test_gap_filler_adds_silence_only_after_long_gaps():
 
 
 class FakeWord:
-    def __init__(self, start, end, word):
-        self.start, self.end, self.word = start, end, word
+    def __init__(self, start, end, word, probability=0.9):
+        self.start, self.end, self.word, self.probability = start, end, word, probability
 
 
 class FakeSegment:
@@ -76,3 +76,13 @@ def test_faster_whisper_backend_options_and_conversion(fake_faster_whisper):
 def test_missing_model_gives_clear_message(fake_faster_whisper):
     with pytest.raises(RuntimeError, match="allow_download"):
         FasterWhisperBackend("not-downloaded", "fr").load()
+
+
+def test_faster_whisper_word_probability(fake_faster_whisper):
+    backend = FasterWhisperBackend("large-v3", "fr")
+    backend.load()
+    audio = np.zeros(16000, np.float32)
+    assert backend.word_probability(audio, "bonjour") == 0.9  # 第一个词就是它：用逐词时间戳里自带的概率
+    options = FakeWhisperModel.last.calls[-1]
+    assert options["word_timestamps"] is True and options["language"] == "fr"
+    assert backend.word_probability(audio, "merci") == 0.0  # 第一个词不是它
