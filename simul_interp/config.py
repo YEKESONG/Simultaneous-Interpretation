@@ -6,12 +6,14 @@ API 密钥不写进 config.toml，而是从环境变量读取；项目根目录�
 
 from __future__ import annotations
 
+import logging
 import os
 import tomllib
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -73,7 +75,7 @@ class UiConfig:
     font_size: int = 22  # 译文（中文）字号，像素
     source_font_ratio: float = 0.82  # 原文字号 = 译文字号 × 这个比例（两者别差太多，方便对照）
     opacity: float = 0.6  # 悬浮窗背景不透明度
-    max_lines: int = 3  # 悬浮窗里最多保留几对原文译文（放不下的会从上边滑出去）
+    scrollback: int = 500  # 悬浮窗里留多少对原文译文供往回翻看（更早的在会话记录里）
 
 
 @dataclass
@@ -151,6 +153,10 @@ def apply_overrides(cfg: Config, overrides: list[str]) -> None:
         setattr(section, name, value)
 
 
+# 已经取消的配置项：旧的 config.toml 里还写着也不报错，只提醒一下
+REMOVED = {("ui", "max_lines"): "字幕窗现在显示窗口放得下的全部历史，并且可以往回翻（见 ui.scrollback）"}
+
+
 def load_config(path: Path | None = None) -> Config:
     load_dotenv(ROOT / ".env")
     cfg = Config()
@@ -165,6 +171,9 @@ def load_config(path: Path | None = None) -> Config:
             raise ValueError(f"{path}: 未知的配置段 [{section_name}]")
         known = {f.name for f in fields(section)}
         for key, value in values.items():
+            if (section_name, key) in REMOVED:
+                logger.warning("%s: [%s] %s 已经不用了，可以删掉：%s", path, section_name, key, REMOVED[section_name, key])
+                continue
             if key not in known:
                 raise ValueError(f"{path}: [{section_name}] 里没有 {key} 这个配置项")
             setattr(section, key, value)

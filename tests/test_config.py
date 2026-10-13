@@ -57,3 +57,12 @@ def test_dotenv_does_not_override_existing(tmp_path, monkeypatch):
     load_dotenv(env)
     assert os.environ["SI_TEST_A"] == "from-file"
     assert os.environ["SI_TEST_B"] == "from-shell"
+
+
+def test_removed_keys_in_old_config_files_are_ignored(tmp_path, caplog):
+    """旧的 config.toml 里还写着已经取消的配置项（如 ui.max_lines）：不能因此启动不了。"""
+    path = tmp_path / "config.toml"
+    path.write_text("[ui]\nmax_lines = 3\nfont_size = 24\n", encoding="utf-8")
+    cfg = load_config(path)
+    assert cfg.ui.font_size == 24 and not hasattr(cfg.ui, "max_lines")
+    assert "max_lines" in caplog.text  # 只提醒一下

@@ -1,10 +1,12 @@
 """透明悬浮字幕窗（PySide6）。
 
 设计目标是“稳”：内容怎么更新，都不能带着别的文字跳来跳去。
-- 底部是高度固定的“当前句”区域：正在识别的法语在这里实时更新（已确认的白色、暂定的灰色），
+- 底部是高度固定的“当前句”区域：正在识别的原文在这里实时更新（已确认的白色、暂定的灰色），
   译文的位置先空着，翻好了直接填进这块空白。区域里怎么变，都不会带动别的内容；
 - 上方是已经翻好的历史，越旧越暗。下一句开始时，当前这一对才从底部区域平滑地滑上去（约 0.2 秒），
   底部区域清空，开始显示下一句；
+- 历史可以往回翻：在字幕窗上滚动滚轮（触控板双指滑动），或者拖右边的滑动条。回看的时候，新的句子照常
+  加在下面，但眼前这几对不动，而且全部用亮色显示；滚回最底下，或者点顶部的提示，就回到最新；
 - 当前句区域至少能放两行原文和两行译文，只在遇到特别长的句子时才扩大；窗口大小只随手动拖动改变；
 - 右上角一个小圆点：听到有人说话时变绿；启动时的状态提示是左上角的一行小字，都不占字幕的位置；
 - 始终置顶、不抢焦点；macOS 上还能浮在全屏视频、全屏会议的上面；
@@ -22,6 +24,7 @@ import sys
 import threading
 import time
 from collections import OrderedDict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
 
@@ -50,10 +53,12 @@ STYLE_VERSION = 2  # 字幕样式改版时加 1：旧版本保存的字号不再
 STREAM_FALLBACK_S = 1.0  # 译文开始出来后迟迟翻不完：最多等这么久，就先当它翻好了往下走
 WAIT_FALLBACK_S = 4.0  # 译文一个字都没出来：最多等这么久
 SCROLL_MS = 220  # 一对原文译文从当前句区域滑上去的时间
-MAX_KEPT = 30  # 最多记住多少个翻译单元（显示的只是最后几对）
-# 按新旧程度的颜色（原文, 译文）：最新的一对最亮，越旧越暗，眼睛自然落在最新的译文上
-AGE_COLORS = [("#dcdcdc", "#ffffff"), ("#a0a0a0", "#c8c8c8"), ("#7c7c7c", "#989898")]
+TEXT_COLORS = ("#dcdcdc", "#ffffff")  # 原文、译文
+# 历史里的一对画得多亮（不透明度）：最新的一对、更旧的。当前句最亮，眼睛自然落在最新的译文上。
+# 明暗在画的时候决定，不写进文字的颜色里：回看时全部按最亮画，不用把几百对重新排版
+HISTORY_OPACITY = (0.76, 0.58)
 LIVE_COLORS = ("#e6e6e6", "#8f8f8f")  # 正在识别的原文：已确认的部分、暂定的部分
+RELAYOUT_NOW = 60  # 历史不超过这么多对时，窗口一变宽窄就全部重新排版；更多时拖动期间只排看得见的
 
 
 class UnitSnapshot(NamedTuple):
@@ -106,10 +111,9 @@ def translation_html(unit: UnitSnapshot, color: str, zh: int) -> str:
     return f'<p style="margin:0; color:{color}; font-size:{zh}px;">{text}</p>'
 
 
-def pair_html(unit: UnitSnapshot, age: int, zh: int, fr: int) -> str:
-    """历史里的一对原文和译文。age = 0 是最新的一对，越旧颜色越暗。"""
-    fr_color, zh_color = AGE_COLORS[min(age, len(AGE_COLORS) - 1)]
-    return source_html(unit.source, fr_color, fr) + translation_html(unit, zh_color, zh)
+def pair_html(unit: UnitSnapshot, zh: int, fr: int) -> str:
+    """一对原文和译文。历史和当前句用同一份文字，历史的明暗在画的时候才决定。"""
+    return source_html(unit.source, TEXT_COLORS[0], fr) + translation_html(unit, TEXT_COLORS[1], zh)
 
 
 def live_html(pending: str, partial: str, fr: int) -> str:
@@ -121,6 +125,17 @@ def live_html(pending: str, partial: str, fr: int) -> str:
     )
 
 
+@dataclass
+class _Pair:
+    """历史里的一对：排好版的文档和它的高度。"""
+
+    key: object
+    html: str
+    doc: QTextDocument
+    height: float
+    width: int  # 排版时用的宽度；和字幕区现在的宽度不一样，就要重新排
+
+
 class CaptionView(QWidget):
     """字幕区，自己排版、自己画，大小不随内容变化，分两部分：
 
@@ -128,18 +143,25 @@ class CaptionView(QWidget):
       译文填进留白），都不会带动别的内容。区域高度只在遇到放不下的长句时扩大，一对滑上去时才可能恢复；
     - 上方的历史：原文译文对从下往上堆。一对从当前句区域滑上去时，先让它停在原来的位置，
       再平滑地滑到历史里；这 0.2 秒里先不画新的当前句，免得两者重叠。
+
+    历史可以往回翻（scroll > 0）。回看时不做滑动动画：新的一对加在下面，同时把 scroll 加上它的高度，
+    这样眼前的内容留在原位。
     """
+
+    scrolled = Signal()  # 往回翻的位置或者历史的总高度变了：外面的滑动条要重画
 
     def __init__(self, parent: QWidget) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.gap = 8  # 两对之间的空隙
         self._fonts = (0, 0)
-        self._history: list[tuple[object, str, QTextDocument]] = []  # (键, 富文本, 排好版的文档)，旧 → 新
+        self._items: list[_Pair] = []  # 历史，旧 → 新
+        self._total = 0.0  # 历史的总高度：每一对的高度，加上每一对下面的空隙
         self._slot_html = ("", "")  # 当前句的 (原文, 译文)
         self._slot_docs = (self._layout(""), self._layout(""))
         self._slot_base = 0.0  # 当前句区域的最小高度：两行原文 + 两行译文
         self.slot_height = 0.0  # 当前句区域的实际高度
+        self.scroll = 0.0  # 往回翻了多少像素；0 = 停在最新
         self._shift = 0.0  # 历史整体往下的额外位移，动画结束时回到 0
         self._slot_hidden = False
         self._anim = QVariantAnimation(self)
@@ -147,13 +169,54 @@ class CaptionView(QWidget):
         self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._anim.valueChanged.connect(self._on_shift)
         self._anim.finished.connect(self._on_anim_done)
+        self._relayout_timer = QTimer(self)
+        self._relayout_timer.setSingleShot(True)
+        self._relayout_timer.setInterval(150)
+        self._relayout_timer.timeout.connect(self.relayout_all)
+
+    # ---- 给外面用的 ----
+
+    @property
+    def reviewing(self) -> bool:
+        """是不是正在回看（没有停在最新）。"""
+        return self.scroll > 0.5
 
     def history_keys(self) -> list:
-        return [key for key, _, _ in self._history]
+        return [item.key for item in self._items]
 
     def history_top(self, key) -> float:
         """某一对历史（动画结束后）的顶边在字幕区里的纵坐标，测试用来检查位置有没有被带动。"""
-        return self.height() - self._offsets()[key]
+        index = next(i for i, item in enumerate(self._items) if item.key == key)
+        return self.height() - self._offset(index) + self.scroll
+
+    def pair_opacity(self, age: int) -> float:
+        """历史里的一对画得多亮。age = 0 是最新的一对，越旧越暗；回看的时候全部按最亮画。"""
+        return 1.0 if self.reviewing else HISTORY_OPACITY[min(age, len(HISTORY_OPACITY) - 1)]
+
+    def view_height(self) -> float:
+        """历史区域的高度：字幕区减去底部的当前句区域。"""
+        return max(0.0, self.height() - self.slot_height)
+
+    def max_scroll(self) -> float:
+        """最多能往回翻多少：翻到头时，最旧的一对正好顶着字幕区的上边。"""
+        return max(0.0, self._total - self.view_height())
+
+    def scroll_by(self, delta: float) -> None:
+        """往回翻 delta 像素（负数是往新的方向翻）。"""
+        self.scroll_to(self.scroll + delta)
+
+    def scroll_to_latest(self) -> None:
+        self.scroll_to(0.0)
+
+    def scroll_to(self, value: float) -> None:
+        value = min(max(0.0, value), self.max_scroll())
+        if abs(value - self.scroll) < 0.01:
+            return
+        self._anim.stop()  # 手动翻的时候不做滑动动画
+        self._shift, self._slot_hidden = 0.0, False
+        self.scroll = value
+        self.update()
+        self.scrolled.emit()
 
     def set_fonts(self, fr: int, zh: int) -> None:
         if (fr, zh) == self._fonts:
@@ -165,46 +228,58 @@ class CaptionView(QWidget):
 
     def set_content(self, history: list[tuple[object, str]], slot: tuple[str, str]) -> None:
         """history：从旧到新的 (键, 一对原文译文的富文本)；slot：当前句的 (原文富文本, 译文富文本)。"""
-        history_changed = [(k, h) for k, h, _ in self._history] != history
-        if not history_changed and slot == self._slot_html:
+        same_history = len(history) == len(self._items) and all(
+            item.key == key and item.html == text for item, (key, text) in zip(self._items, history)
+        )
+        if same_history and slot == self._slot_html:
             return
-        old_keys = self.history_keys()
-        old_offsets = self._offsets()
-        if history_changed:
-            cache = {key: (text, doc) for key, text, doc in self._history}
-            rebuilt = []
-            for key, text in history:
-                cached = cache.get(key)
-                doc = cached[1] if cached and cached[0] == text else self._layout(text)
-                rebuilt.append((key, text, doc))
-            self._history = rebuilt
+        # 先记下最后几对现在的位置：内容变了以后，原来就在的那一对要留在原位
+        count = len(self._items)
+        before = {self._items[i].key: self._offset(i) for i in range(max(0, count - 3), count)}
+        old_keys = {item.key for item in self._items} if not same_history else None
+        if not same_history:
+            self._rebuild(history)
         if slot != self._slot_html:
             self._slot_html = slot
             self._slot_docs = (self._layout(slot[0]), self._layout(slot[1]))
 
-        new_keys = self.history_keys()
-        moved_up = bool(new_keys) and new_keys[-1] not in old_keys  # 有一对从当前句区域滑进了历史
+        moved_up = old_keys is not None and bool(self._items) and self._items[-1].key not in old_keys
         # 当前句区域：平时只增不减（里面怎么变都不影响上面）；一对滑上去的时候才按新内容重新定高度
         needed = max(self._slot_base, self._slot_needed())
         self.slot_height = needed if moved_up else max(self.slot_height, needed)
 
-        new_offsets = self._offsets()
-        anchor = next((key for key in reversed(new_keys) if key in old_offsets), None)
+        count = len(self._items)
+        anchor = next((i for i in range(count - 1, max(-1, count - 4), -1) if self._items[i].key in before), None)
         if anchor is not None:
-            start = self._shift + new_offsets[anchor] - old_offsets[anchor]  # 原来就在的内容先停在原位
+            delta = self._offset(anchor) - before[self._items[anchor].key]  # 原来就在的内容被顶起了多少
         elif moved_up:
-            start = new_offsets[new_keys[-1]] - self.slot_height  # 第一条历史：从当前句区域的位置出发
+            delta = self._offset(count - 1) - self.slot_height  # 第一条历史：从当前句区域的位置出发
         else:
-            start = 0.0
+            delta = 0.0
         self._anim.stop()
-        self._slot_hidden = moved_up and abs(start) > 0.5
-        if abs(start) > 0.5:
-            self._anim.setStartValue(start)
-            self._anim.setEndValue(0.0)
-            self._anim.start()
+        if self.reviewing:
+            # 正在回看：不做动画，把翻的位置跟着挪，眼前的内容就留在原位
+            self._shift, self._slot_hidden = 0.0, False
+            self.scroll = min(max(0.0, self.scroll + delta), self.max_scroll())
         else:
-            self._shift = 0.0
+            start = self._shift + delta if anchor is not None else delta
+            self._slot_hidden = moved_up and abs(start) > 0.5
+            if abs(start) > 0.5:
+                self._anim.setStartValue(start)
+                self._anim.setEndValue(0.0)
+                self._anim.start()
+            else:
+                self._shift = 0.0
         self.update()
+        self.scrolled.emit()
+
+    def relayout_all(self) -> None:
+        """按现在的宽度把所有历史重新排一遍（窗口宽窄变了之后）。"""
+        for item in self._items:
+            self._ensure(item)
+        self.scroll = min(self.scroll, self.max_scroll())
+        self.update()
+        self.scrolled.emit()
 
     # ---- 排版 ----
 
@@ -222,14 +297,39 @@ class CaptionView(QWidget):
     def _slot_needed(self) -> float:
         return sum(doc.size().height() for doc in self._slot_docs if not doc.isEmpty())
 
-    def _offsets(self) -> dict:
-        """每一对历史的顶边离字幕区底边多远：先是当前句区域，再往上逐对累加。"""
-        offsets, total = {}, self.slot_height + self.gap
-        for key, _, doc in reversed(self._history):
-            total += doc.size().height()
-            offsets[key] = total
-            total += self.gap
-        return offsets
+    def _rebuild(self, history: list[tuple[object, str]]) -> None:
+        """按新的列表更新历史：没变的一对沿用排好的文档，只有新的、文字变了的才重新排版。"""
+        cache = {item.key: item for item in self._items}
+        width = max(1, self.width())
+        items = []
+        for key, text in history:
+            item = cache.pop(key, None)
+            if item is None:
+                doc = self._layout(text)
+                item = _Pair(key, text, doc, doc.size().height(), width)
+            elif item.html != text:
+                item.html = text
+                item.doc.setHtml(text)
+                item.doc.setTextWidth(width)
+                item.height, item.width = item.doc.size().height(), width
+            items.append(item)
+        for item in cache.values():  # 不再显示的：把文档还给 Qt
+            item.doc.deleteLater()
+        self._items = items
+        self._total = sum(item.height for item in items) + self.gap * len(items)
+
+    def _ensure(self, item: _Pair) -> None:
+        """这一对是按别的宽度排的版，就按现在的宽度重排。"""
+        width = max(1, self.width())
+        if item.width != width:
+            item.doc.setTextWidth(width)
+            height = item.doc.size().height()
+            self._total += height - item.height
+            item.height, item.width = height, width
+
+    def _offset(self, index: int) -> float:
+        """第 index 对历史的顶边离字幕区底边多远：先是当前句区域，再往上逐对累加。"""
+        return self.slot_height + sum(item.height + self.gap for item in self._items[index:])
 
     # ---- 动画和绘制 ----
 
@@ -243,38 +343,45 @@ class CaptionView(QWidget):
         self.update()
 
     def resizeEvent(self, event) -> None:
-        for _, _, doc in self._history:
-            doc.setTextWidth(max(1, self.width()))
-        for doc in self._slot_docs:
-            doc.setTextWidth(max(1, self.width()))
+        if event.oldSize().width() != self.width():
+            for doc in self._slot_docs:
+                doc.setTextWidth(max(1, self.width()))
+            if len(self._items) <= RELAYOUT_NOW:
+                for item in self._items:
+                    self._ensure(item)
+            else:
+                self._relayout_timer.start()
         self.slot_height = max(self._slot_base, self._slot_needed())
+        self.scroll = min(self.scroll, self.max_scroll())
         super().resizeEvent(event)
+        self.scrolled.emit()
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
-        painter.setClipRect(self.rect())
         slot_top = self.height() - self.slot_height
-        y = slot_top - self.gap + self._shift
-        for _, _, doc in reversed(self._history):
-            height = doc.size().height()
-            y -= height
-            if y + height < 0:
-                break  # 再往上的已经滑出字幕区了
-            painter.save()
-            painter.translate(0, y)
-            doc.drawContents(painter)
-            painter.restore()
-            y -= self.gap
+        # 历史不能画进当前句区域；只有一对正从当前句区域滑上去的那一下例外（这时当前句先不画）
+        painter.setClipRect(0, 0, self.width(), self.height() if self._slot_hidden else int(slot_top))
+        y = slot_top + self._shift + self.scroll  # 从最新的一对往上画
+        for age, item in enumerate(reversed(self._items)):
+            self._ensure(item)
+            y -= self.gap + item.height
+            if y + item.height < 0:
+                break  # 再往上的已经在字幕区外面了
+            if y < self.height():
+                painter.save()
+                painter.translate(0, y)
+                painter.setOpacity(self.pair_opacity(age))
+                item.doc.drawContents(painter)
+                painter.restore()
         if self._slot_hidden:
             return
         source, translation = self._slot_docs
-        painter.save()
+        painter.setOpacity(1.0)
         painter.setClipRect(0, int(slot_top), self.width(), int(self.slot_height) + 1)
         painter.translate(0, slot_top)
         source.drawContents(painter)
         painter.translate(0, 0 if source.isEmpty() else source.size().height())  # 译文紧接在原文下面
         translation.drawContents(painter)
-        painter.restore()
 
 
 class Overlay(QWidget):
@@ -299,13 +406,16 @@ class Overlay(QWidget):
         self.font_size = int(self.settings.value("font_size", cfg.font_size))
         self.source_ratio = cfg.source_font_ratio
         self.opacity = float(self.settings.value("opacity", cfg.opacity))
-        self.max_lines = cfg.max_lines
+        self.scrollback = max(10, cfg.scrollback)
         self.click_through = False
         self.on_reconnect = None  # 由 run_overlay 设置：重新连接音频设备
 
-        self.units: OrderedDict[int, UnitSnapshot] = OrderedDict()
+        self.units: OrderedDict[int, UnitSnapshot] = OrderedDict()  # 按编号从小到大
         self._seen_at: dict[int, float] = {}  # 每个单元第一次出现的时刻
         self._first_text_at: dict[int, float] = {}  # 每个单元译文开始出现的时刻
+        self._open: set[int] = set()  # 还没翻完的单元：有它们在，就要定时检查“等太久就往下走”
+        self._pairs: dict[int, tuple] = {}  # 每个单元排版用的富文本，文字和字号没变就不重新生成
+        self._dirty = True  # 有东西变了，下一次 refresh 要重新安排显示
         self.live = ("", "")  # 正在识别的 (已确认但还没凑成一句的原文, 暂定的尾巴)
         self._promoted = -1  # 已经滑进历史的最新一个单元编号（滑进去就不再回到当前句区域）
         self.hearing = False
@@ -317,10 +427,12 @@ class Overlay(QWidget):
         shadow.setOffset(0, 1)
         shadow.setColor(QColor(0, 0, 0, 230))
         self.captions.setGraphicsEffect(shadow)
+        self.captions.scrolled.connect(self.update)  # 滑动条画在这个窗口上
         self.grip = QSizeGrip(self)
         self.grip.resize(16, 16)
 
         self._drag_from: QPoint | None = None
+        self._thumb_grab: float | None = None  # 正在拖滑动条：按下时鼠标离滑块顶边多远
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.refresh)  # “等太久就往下走”要看时间，所以定时检查；内容没变时什么也不做
         self._timer.start(50)
@@ -330,7 +442,9 @@ class Overlay(QWidget):
 
     def set_live(self, pending: str, partial: str, translation: str = "") -> None:
         """正在识别的原文：显示在底部的当前句区域；投机译文不显示（它可能还会变）。"""
-        self.live = (pending, partial)
+        if (pending, partial) != self.live:
+            self.live = (pending, partial)
+            self._dirty = True
         hearing = bool(pending or partial)
         if hearing != self.hearing:
             self.hearing = hearing
@@ -341,11 +455,20 @@ class Overlay(QWidget):
         self._seen_at.setdefault(unit.id, moment)
         if unit.translation:
             self._first_text_at.setdefault(unit.id, moment)
+        out_of_order = unit.id not in self.units and bool(self.units) and unit.id < next(reversed(self.units))
         self.units[unit.id] = unit
-        while len(self.units) > MAX_KEPT:
+        if out_of_order:  # 两个单元几乎同时发出时，通知到达的先后可能反过来：按编号排回去
+            self.units = OrderedDict(sorted(self.units.items()))
+        if unit.done or unit.error:
+            self._open.discard(unit.id)
+        else:
+            self._open.add(unit.id)
+        while len(self.units) > self.scrollback:  # 更早的不留在字幕窗里了，完整的内容在会话记录里
             old_id, _ = self.units.popitem(last=False)
-            self._seen_at.pop(old_id, None)
-            self._first_text_at.pop(old_id, None)
+            for store in (self._seen_at, self._first_text_at, self._pairs):
+                store.pop(old_id, None)
+            self._open.discard(old_id)
+        self._dirty = True
 
     def set_status(self, text: str) -> None:
         if text != self.status:
@@ -356,7 +479,11 @@ class Overlay(QWidget):
         self.units.clear()
         self._seen_at.clear()
         self._first_text_at.clear()
+        self._open.clear()
+        self._pairs.clear()
         self._promoted = -1
+        self._dirty = True
+        self.captions.scroll_to_latest()
 
     # ---- 显示什么 ----
 
@@ -400,20 +527,24 @@ class Overlay(QWidget):
             slot = ("live", pending, partial)
         else:
             slot = ("empty",)
-        return history[-self.max_lines :], slot
+        return history, slot
+
+    def _pair(self, unit: UnitSnapshot, zh: int, fr: int) -> str:
+        cached = self._pairs.get(unit.id)
+        if cached is None or cached[0] is not unit or cached[1:3] != (zh, fr):
+            cached = self._pairs[unit.id] = (unit, zh, fr, pair_html(unit, zh, fr))
+        return cached[3]
 
     def refresh(self) -> None:
+        if not self._dirty and not self._open:
+            return  # 没有东西变，也没有正在等的译文：什么都不用做
+        self._dirty = False
         zh = self.font_size
         fr = max(11, round(zh * self.source_ratio))
         history, slot = self.compose()
-        # 当前句区域最亮，历史从次一级开始、越旧越暗。明暗只看新旧，不随当前句区域的状态变化，
-        # 否则当前句区域在“译文”和“暂定文字”之间切换时，整片历史会跟着变一次颜色
-        history_blocks = [
-            (unit.id, pair_html(unit, len(history) - index, zh, fr)) for index, unit in enumerate(history)
-        ]
+        history_blocks = [(unit.id, self._pair(unit, zh, fr)) for unit in history]
         if slot[0] == "unit":
-            fr_color, zh_color = AGE_COLORS[0]
-            slot_html = (source_html(slot[1].source, fr_color, fr), translation_html(slot[1], zh_color, zh))
+            slot_html = (source_html(slot[1].source, TEXT_COLORS[0], fr), translation_html(slot[1], TEXT_COLORS[1], zh))
         elif slot[0] == "live":
             slot_html = (live_html(slot[1], slot[2], fr), "")  # 译文的位置先留白
         else:
@@ -424,6 +555,26 @@ class Overlay(QWidget):
 
     # ---- 绘制 ----
 
+    def _review_hint(self) -> QRect:
+        """回看时顶部那行提示的位置（点它回到最新）。"""
+        return QRect(self.width() // 2 - 120, 2, 240, 17)
+
+    def _scroll_track(self) -> QRect:
+        """滑动条的轨道：贴着字幕区的右边，和历史区域一样高。"""
+        area = self.captions.geometry()
+        return QRect(self.width() - 13, area.top(), 6, max(1, int(self.captions.view_height())))
+
+    def _scroll_thumb(self) -> QRect | None:
+        """滑块的位置；历史没有多到要翻的时候返回 None。滑块在最下面 = 停在最新。"""
+        longest = self.captions.max_scroll()
+        if longest <= 0:
+            return None
+        track = self._scroll_track()
+        view = self.captions.view_height()
+        height = min(track.height(), max(24, round(track.height() * view / (view + longest))))
+        top = track.top() + round((track.height() - height) * (1 - self.captions.scroll / longest))
+        return QRect(track.left(), top, track.width(), height)
+
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -433,12 +584,23 @@ class Overlay(QWidget):
         # 右上角的小圆点：听到有人说话时变绿
         painter.setBrush(QColor(92, 214, 128) if self.hearing else QColor(130, 130, 130, 150))
         painter.drawEllipse(QPointF(self.width() - 14, 12), 3.5, 3.5)
+        thumb = self._scroll_thumb()
+        if thumb is not None:  # 滑动条：平时很淡，回看或者拖动的时候亮一些
+            active = self.captions.reviewing or self._thumb_grab is not None
+            painter.setBrush(QColor(255, 255, 255, 22))
+            painter.drawRoundedRect(self._scroll_track(), 3, 3)
+            painter.setBrush(QColor(255, 255, 255, 150 if active else 70))
+            painter.drawRoundedRect(thumb, 3, 3)
+        font = QFont()
+        font.setPixelSize(12)
+        painter.setFont(font)
         if self.status:  # 状态提示：左上角一行小字，不占字幕的位置
-            font = QFont()
-            font.setPixelSize(12)
-            painter.setFont(font)
             painter.setPen(QColor("#ffd479"))
-            painter.drawText(QRect(20, 3, self.width() - 60, 16), Qt.AlignmentFlag.AlignLeft, self.status)
+            right = self._review_hint().left() - 8 if self.captions.reviewing else self.width() - 40
+            painter.drawText(QRect(20, 3, max(0, right - 20), 16), Qt.AlignmentFlag.AlignLeft, self.status)
+        if self.captions.reviewing:
+            painter.setPen(QColor("#9fd0ff"))
+            painter.drawText(self._review_hint(), Qt.AlignmentFlag.AlignCenter, "正在回看 · 点这里回到最新 ↓")
 
     def resizeEvent(self, event) -> None:
         # 手动摆放字幕区，不用布局管理器：布局会根据内容改窗口的最小尺寸，文字一多窗口就被撑大
@@ -446,23 +608,60 @@ class Overlay(QWidget):
         self.grip.move(self.width() - self.grip.width() - 4, self.height() - self.grip.height() - 4)
         super().resizeEvent(event)
 
-    # ---- 鼠标：拖动、右键菜单 ----
+    # ---- 鼠标：拖动、回看、右键菜单 ----
+
+    def wheelEvent(self, event) -> None:
+        """滚轮或触控板双指滑动：往回翻历史。"""
+        delta = event.pixelDelta().y()  # 触控板给的是像素，跟手
+        if not delta:
+            delta = event.angleDelta().y() / 120 * self.font_size * 3  # 鼠标滚轮：一格大约三行
+        if delta:
+            self.captions.scroll_by(delta)
+        event.accept()
 
     def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        pos = event.position().toPoint()
+        thumb = self._scroll_thumb()
+        if thumb is not None and self._scroll_track().adjusted(-7, 0, 7, 0).contains(pos):
+            if not thumb.adjusted(-7, 0, 7, 0).contains(pos):
+                self._move_thumb(pos.y() - thumb.height() / 2)  # 点在滑块外面的轨道上：滑块直接跳过来
+                thumb = self._scroll_thumb()
+            self._thumb_grab = pos.y() - thumb.top()
+            self.update()
+        elif self.captions.reviewing and self._review_hint().contains(pos):
+            self.captions.scroll_to_latest()
+        else:
             self._drag_from = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
 
     def mouseMoveEvent(self, event) -> None:
-        if self._drag_from is not None:
+        if self._thumb_grab is not None:
+            self._move_thumb(event.position().y() - self._thumb_grab)
+        elif self._drag_from is not None:
             self.move(event.globalPosition().toPoint() - self._drag_from)
 
     def mouseReleaseEvent(self, event) -> None:
         self._drag_from = None
+        if self._thumb_grab is not None:
+            self._thumb_grab = None
+            self.update()
+
+    def _move_thumb(self, top: float) -> None:
+        """把滑块的顶边放到 top（窗口坐标），历史跟着翻到对应的位置。"""
+        track, thumb = self._scroll_track(), self._scroll_thumb()
+        if thumb is None or track.height() <= thumb.height():
+            return
+        fraction = 1 - (top - track.top()) / (track.height() - thumb.height())
+        self.captions.scroll_to(fraction * self.captions.max_scroll())
 
     def contextMenuEvent(self, event) -> None:
         self.build_menu(QMenu(self)).exec(event.globalPos())
 
     def build_menu(self, menu: QMenu) -> QMenu:
+        if self.captions.reviewing:
+            menu.addAction("回到最新字幕", self.captions.scroll_to_latest)
+            menu.addSeparator()
         menu.addAction("字号放大", lambda: self.change_font(+2))
         menu.addAction("字号缩小", lambda: self.change_font(-2))
         menu.addAction("背景加深", lambda: self.change_opacity(+0.1))
@@ -482,6 +681,7 @@ class Overlay(QWidget):
 
     def change_font(self, delta: int) -> None:
         self.font_size = max(14, min(64, self.font_size + delta))
+        self._dirty = True
 
     def change_opacity(self, delta: float) -> None:
         self.opacity = round(max(0.0, min(0.95, self.opacity + delta)), 2)
