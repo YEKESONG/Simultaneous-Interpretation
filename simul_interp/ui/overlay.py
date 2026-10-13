@@ -50,6 +50,7 @@ STREAM_FALLBACK_S = 1.0  # 译文开始出来后迟迟翻不完：最多等这�
 WAIT_FALLBACK_S = 4.0  # 译文一个字都没出来：最多等这么久
 SCROLL_MS = 220  # 一对原文译文从当前句区域滑上去的时间
 TEXT_COLORS = ("#dcdcdc", "#ffffff")  # 原文、译文
+DRAFT_COLOR = "#c2c2c2"  # 译文草稿（话还没说完，还会变）：比正式译文暗一点
 # 历史里的一对画得多亮（不透明度）：最新的一对、更旧的。当前句最亮，眼睛自然落在最新的译文上。
 # 明暗在画的时候决定，不写进文字的颜色里：回看时全部按最亮画，不用把几百对重新排版
 HISTORY_OPACITY = (0.76, 0.58)
@@ -64,9 +65,10 @@ class UnitSnapshot(NamedTuple):
 
     id: int
     source: str
-    translation: str
+    translation: str  # 屏幕上该显示的译文：正式译文，或者它出来之前先顶着的草稿
     done: bool
     error: str
+    tentative: bool = False  # 显示的还是草稿
 
 
 class Bridge(QObject):
@@ -86,7 +88,9 @@ class QtView:
         self.bridge.live.emit(pending, partial, translation)
 
     def on_unit(self, unit: TranslationUnit) -> None:
-        self.bridge.unit.emit(UnitSnapshot(unit.id, unit.source, unit.translation, unit.done, unit.error))
+        self.bridge.unit.emit(
+            UnitSnapshot(unit.id, unit.source, unit.shown, unit.done, unit.error, unit.tentative)
+        )
 
     def on_status(self, text: str) -> None:
         self.bridge.status.emit(text)
@@ -104,9 +108,18 @@ def translation_html(unit: UnitSnapshot, color: str, zh: int) -> str:
         return ""
     else:
         text = html.escape(unit.translation)
+        if unit.tentative:
+            color = DRAFT_COLOR
         if not unit.done:  # 还在翻：末尾加一个灰色省略号
             text += '<span style="color:#8a8a8a;">…</span>'
     return f'<p style="margin:0; color:{color}; font-size:{zh}px;">{text}</p>'
+
+
+def draft_html(text: str, zh: int) -> str:
+    """正在说的这句话到目前为止的译文（草稿）；没有时返回空串（位置留白）。"""
+    if not text:
+        return ""
+    return f'<p style="margin:0; color:{DRAFT_COLOR}; font-size:{zh}px;">{html.escape(text)}</p>'
 
 
 def pair_html(unit: UnitSnapshot, zh: int, fr: int) -> str:
@@ -418,6 +431,7 @@ class Overlay(QWidget):
         self._pairs: dict[int, tuple] = {}  # 每个单元排版用的富文本，文字和字号没变就不重新生成
         self._dirty = True  # 有东西变了，下一次 refresh 要重新安排显示
         self.live = ("", "")  # 正在识别的 (已确认但还没凑成一句的原文, 暂定的尾巴)
+        self.live_translation = ""  # 正在说的这句话到目前为止的译文（草稿）
         self._promoted = -1  # 已经滑进历史的最新一个单元编号（滑进去就不再回到当前句区域）
         self.hearing = False
         self.status = "正在启动……"
@@ -444,9 +458,10 @@ class Overlay(QWidget):
     # ---- 数据更新（主线程） ----
 
     def set_live(self, pending: str, partial: str, translation: str = "") -> None:
-        """正在识别的原文：显示在底部的当前句区域；投机译文不显示（它可能还会变）。"""
-        if (pending, partial) != self.live:
-            self.live = (pending, partial)
+        """正在识别的原文和它到目前为止的译文（草稿），显示在底部的当前句区域。
+        草稿会随着话往下说而更新，但只在这块预留的区域里变，不会带动上面的历史。"""
+        if (pending, partial, translation) != (*self.live, self.live_translation):
+            self.live, self.live_translation = (pending, partial), translation
             self._dirty = True
         hearing = bool(pending or partial)
         if hearing != self.hearing:
@@ -456,7 +471,7 @@ class Overlay(QWidget):
     def set_unit(self, unit: UnitSnapshot) -> None:
         moment = now()
         self._seen_at.setdefault(unit.id, moment)
-        if unit.translation:
+        if unit.translation and not unit.tentative:  # 草稿不算：要等正式译文开始出现
             self._first_text_at.setdefault(unit.id, moment)
         out_of_order = unit.id not in self.units and bool(self.units) and unit.id < next(reversed(self.units))
         self.units[unit.id] = unit
@@ -496,6 +511,7 @@ class Overlay(QWidget):
         return (
             unit.done
             or bool(unit.error)
+            or unit.tentative  # 下面已经显示着草稿：不用占着当前句区域等正式译文，下一句一开始就让位
             or (first is not None and moment - first >= STREAM_FALLBACK_S)
             or moment - self._seen_at.get(unit.id, moment) >= WAIT_FALLBACK_S
         )
@@ -549,7 +565,7 @@ class Overlay(QWidget):
         if slot[0] == "unit":
             slot_html = (source_html(slot[1].source, TEXT_COLORS[0], fr), translation_html(slot[1], TEXT_COLORS[1], zh))
         elif slot[0] == "live":
-            slot_html = (live_html(slot[1], slot[2], fr), "")  # 译文的位置先留白
+            slot_html = (live_html(slot[1], slot[2], fr), draft_html(self.live_translation, zh))
         else:
             slot_html = ("", "")
         self.captions.gap = max(6, round(zh * 0.4))

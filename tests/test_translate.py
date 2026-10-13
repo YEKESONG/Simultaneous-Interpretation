@@ -113,15 +113,16 @@ def test_speculation_hit_is_adopted_without_second_request():
     stage = TranslationStage(translator, lambda unit: None, speculative=True, on_speculation=shown.append)
     stage.feed("Bonjour à", final=False)  # 已确认的两个词，还没凑成单元
     stage.speculate("tous. Nous")  # 加上暂定的 “tous.” 就是一整句：先送去翻译
-    assert wait_for(lambda: stage.speculative_translation)  # 原文还没确认，投机译文已经在显示
+    assert wait_for(lambda: stage._spec is not None and stage._spec.done_at)  # 原文还没确认，译文已经翻好备着
     units = stage.feed("tous.", final=False)  # 正式确认，文字和投机的一样
     stage.close()
     assert translator.calls == ["Bonjour à tous."]  # 只请求了一次
     unit = units[0]
     assert unit.speculative and unit.done and unit.translation.startswith("译")
     assert unit.first_token_at < unit.ready_at  # 原文确认之前，译文就已经开始出现
-    assert stage.stats == {"speculated": 1, "adopted": 1}
-    assert shown
+    assert stage.stats == {"speculated": 1, "adopted": 1, "drafted": 0}
+    # 投机的译文不显示在“正在说”那一行：暂定文字末尾的句号常常是假的，这时显示出来的是一句“说完了”的错话
+    assert shown == []
 
 
 def test_speculation_miss_is_cancelled_and_retranslated():
@@ -134,7 +135,7 @@ def test_speculation_miss_is_cancelled_and_retranslated():
     stage.close()
     assert translator.calls == ["Les résultats sont encouragés.", "Les résultats sont encourageants."]
     assert not units[0].speculative and units[0].translation.startswith("译")
-    assert stage.stats == {"speculated": 1, "adopted": 0}
+    assert stage.stats == {"speculated": 1, "adopted": 0, "drafted": 0}
 
 
 def test_no_speculation_without_a_complete_unit_or_on_long_guesses():
@@ -265,7 +266,7 @@ def test_waiting_fragment_is_translated_ahead_of_time(monkeypatch):
     assert wait_for(lambda: seen)
     stage.close()
     assert translator.calls == ["et ensuite nous"] and seen[0].speculative  # 只请求了一次
-    assert stage.stats == {"speculated": 1, "adopted": 1}
+    assert stage.stats == {"speculated": 1, "adopted": 1, "drafted": 0}
 
 
 def test_prompt_follows_the_languages_chosen_at_run_time():
@@ -294,3 +295,148 @@ def test_context_can_be_dropped_when_the_language_changes():
     stage.feed("Good morning.", final=True)
     stage.close()
     assert contexts == [[], []]
+
+
+# ---- 边说边译：当前句的译文草稿 ----
+
+
+class DraftingTranslator:
+    """记下每次请求；草稿的“译文”是 “稿” + 原文的词数，正式译文是 “正式：” + 原文。gate 关着时请求会停住。"""
+
+    def __init__(self, open_gate=True):
+        self.calls = []  # (原文, 是不是草稿, 给它的上一版草稿)
+        self.gate = threading.Event()
+        if open_gate:
+            self.gate.set()
+
+    def stream(self, source, context=None, draft=False, previous=""):
+        self.calls.append((source, draft, previous))
+        self.gate.wait(2)
+        if draft:
+            yield "稿"
+            yield str(len(source.split()))
+        else:
+            yield "正式：" + source
+
+    def close(self):
+        pass
+
+
+def test_draft_follows_the_sentence_while_it_is_being_spoken():
+    translator = DraftingTranslator()
+    shown = []
+    stage = TranslationStage(translator, lambda unit: None, live_draft=True, on_speculation=shown.append)
+    stage.feed("Nous allons", final=False)
+    stage.speculate("voir")  # 一共 3 个词，但最末尾那个暂定词最不可靠，先不算：还不够出第一版
+    assert translator.calls == []
+    stage.speculate("voir la suite")  # 可靠的有 4 个词了：话还没说完，先译一版显示出来
+    assert wait_for(lambda: stage.live_translation == "稿4")
+    assert translator.calls == [("Nous allons voir la", True, "")] and stage.live_covered == 4
+    stage.speculate("voir la suite de")  # 只多了一个词：不值得再请求一次
+    stage.speculate("voir la suite de ce projet")  # 又多了三个词：出下一版，并把上一版交给模型沿用
+    assert wait_for(lambda: stage.live_translation == "稿7")
+    assert translator.calls[-1] == ("Nous allons voir la suite de ce", True, "稿4") and len(translator.calls) == 2
+    assert shown[-1] == "稿7" and stage.stats["drafted"] == 2
+    units = stage.feed("voir la suite de ce projet.", final=False)  # 整句确认了
+    assert stage.live_translation == ""  # “正在说”那一行清空，草稿跟着这句话走
+    assert units[0].placeholder == "稿7"
+    stage.close()
+    assert units[0].translation == "正式：Nous allons voir la suite de ce projet." and units[0].shown == units[0].translation
+
+
+def test_only_one_draft_is_requested_at_a_time():
+    translator = DraftingTranslator(open_gate=False)
+    stage = TranslationStage(translator, lambda unit: None, live_draft=True)
+    stage.speculate("un deux trois quatre")
+    assert wait_for(lambda: translator.calls)
+    stage.speculate("un deux trois quatre cinq six sept")  # 上一版还没回来：先不请求
+    stage.speculate("un deux trois quatre cinq six sept huit neuf dix")
+    time.sleep(0.05)
+    assert len(translator.calls) == 1
+    translator.gate.set()  # 回来了：马上照着最新的文字出下一版，中间那一次直接跳过
+    assert wait_for(lambda: len(translator.calls) == 2)
+    assert translator.calls[1][0] == "un deux trois quatre cinq six sept huit neuf"
+    stage.close()
+
+
+def test_line_does_not_shrink_while_a_new_draft_is_arriving():
+    stage = TranslationStage(DraftingTranslator(), lambda unit: None, live_draft=True)
+    assert stage._offer_live(1, "接下来，我建议", 4, True) == "接下来，我建议"
+    assert stage._offer_live(2, "接下来", 6, False) is None  # 新的一版才来了开头：先留着旧的，不让这一行缩回去
+    assert stage.live_translation == "接下来，我建议" and stage.live_covered == 4
+    assert stage._offer_live(2, "接下来，我建议我们", 6, False) == "接下来，我建议我们"  # 追上了：换成新的
+    assert stage._offer_live(1, "旧的一版又来了一个字", 4, False) is None  # 更早发起的不能盖掉更晚的
+    assert stage._offer_live(3, "下一步", 8, True) == "下一步"  # 新的一版完整回来了：即使更短也换（它改了说法）
+    stage.close()
+
+
+def test_unit_shows_the_draft_until_its_translation_catches_up():
+    translator = DraftingTranslator()
+    seen, on_update = collector()
+    stage = TranslationStage(translator, on_update, live_draft=True)
+    stage.speculate("Nous allons voir la suite demain")
+    assert wait_for(lambda: stage.live_translation)
+    translator.gate.clear()
+    unit = stage.feed("Nous allons voir la suite.", final=False)[0]
+    assert unit.translation == "" and unit.tentative and unit.shown == "稿5"  # 正式译文没到：接着显示草稿
+    translator.gate.set()
+    assert wait_for(lambda: unit.done)
+    stage.close()
+    assert not unit.tentative and unit.shown == "正式：Nous allons voir la suite."
+
+
+def test_draft_that_comes_back_after_the_sentence_was_cut_is_ignored():
+    translator = DraftingTranslator(open_gate=False)
+    shown = []
+    stage = TranslationStage(translator, lambda unit: None, live_draft=True, on_speculation=shown.append)
+    stage.speculate("Nous allons voir la suite demain")
+    assert wait_for(lambda: translator.calls)
+    stage.feed("Nous allons voir la suite.", final=False)  # 草稿还在路上，这句话已经切走了
+    translator.gate.set()
+    stage.close()
+    assert shown == [] and stage.live_translation == ""  # 迟到的草稿不会显示到下一句下面
+
+
+def test_fragment_left_at_a_pause_is_drafted_to_its_last_word():
+    translator = DraftingTranslator()
+    stage = TranslationStage(translator, lambda unit: None, live_draft=True, incomplete_wait_s=30)
+    stage.feed("et ensuite", final=True)  # 这段话停了，留下两个词的半句：不会再有新词来凑数，现在就译出来
+    assert wait_for(lambda: stage.live_translation == "稿2")
+    assert translator.calls == [("et ensuite", True, "")]
+    stage.close()
+
+
+def test_draft_prompt_marks_the_fragment_and_leaves_out_the_context():
+    translator = make_translator(lambda request: httpx.Response(200, content=sse("好")))
+    user = translator.messages("Nous allons voir", ["Bonjour à tous."], draft=True, previous="我们要")[1]["content"]
+    assert "「Nous allons voir」" in user and "还没说完" in user and "「我们要」" in user
+    assert "Bonjour" not in user  # 草稿不带上文：带上的话模型会把上文也译进来
+    plain = translator.messages("Nous allons voir.", ["Bonjour à tous."])[1]["content"]
+    assert plain.startswith("上文") and plain.endswith("需要翻译：\nNous allons voir.")  # 正式译文的提示词没变
+    translator.close()
+
+
+def test_request_that_never_starts_answering_is_given_up(monkeypatch):
+    """翻译服务繁忙时不报错，只是隔一会儿发一行“保持连接”，能挂好几分钟：等不到第一个字就放弃。"""
+    clock = iter(range(0, 1000, 3))  # 每看一次时间就过去 3 秒
+    monkeypatch.setattr(translate, "now", lambda: next(clock))
+    waiting = (": keep-alive\n\n" * 5).encode() + sse("太晚了")
+    translator = make_translator(lambda request: httpx.Response(200, content=waiting))
+    with pytest.raises(TranslationError, match="没有开始返回"):
+        list(translator.stream("Bonjour", draft=True))  # 草稿的期限是 4 秒
+    translator.close()
+
+
+def test_translation_is_retried_once_if_nothing_came_back():
+    attempts = []
+
+    def handler(request):
+        attempts.append(1)
+        if len(attempts) == 1:
+            return httpx.Response(503, text="busy")
+        return httpx.Response(200, content=sse("大家好。"))
+
+    stage = TranslationStage(make_translator(handler), lambda unit: None)
+    unit = stage.feed("Bonjour à tous.", final=False)[0]
+    stage.close()
+    assert len(attempts) == 2 and unit.translation == "大家好。" and unit.error == ""

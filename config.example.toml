@@ -35,6 +35,9 @@ temperature = 0.2
 speculative = true           # 投机翻译：句子还没完全确认就先翻，中文早出现约 0.9 秒；代价是请求数约为 3 倍
 speculative_max_words = 12   # 凑成一句还要靠超过这么多个暂定词时不投机
 incomplete_wait_s = 1.5      # 说话人停下来想词时留下的半句先不翻译，安静这么多秒还没下文才翻；0 = 说完就翻
+live_draft = true            # 边说边译：话还没说完就先出中文草稿，每多几个词更新一版；代价是翻译请求多出几倍
+draft_min_words = 3          # 一句话至少听到这么多个词才出第一版草稿
+draft_step_words = 2         # 比上一版草稿多出这么多个词才出下一版
 # DeepSeek 默认开启“思考模式”（先思考再输出，慢很多），同传必须关掉；换别的服务商时按它的文档改或删掉
 extra_body = { thinking = { type = "disabled" } }
 # glossary = { "IA" = "人工智能", "TP" = "实验课" }

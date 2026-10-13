@@ -64,6 +64,11 @@ class TranslateConfig:
     # 说话人停下来想词时留下的半句话（结尾不是句号、问号）先不翻译，等他接着说，接上了再一起翻；
     # 安静了这么多秒还没有下文才送去翻译。实测多等 1.5 秒能接上约 87% 的半句（DEVLOG S16）。0 = 不等
     incomplete_wait_s: float = 1.5
+    # 边说边译：正在说的这句话还没说完，就把已经听到的部分先译一版草稿显示出来，之后每多几个词更新一版，
+    # 整句定下来再换成正式译文。屏幕上的中文紧跟着法语走（DEVLOG S21）；代价是翻译请求多出几倍
+    live_draft: bool = True
+    draft_min_words: int = 3  # 一句话至少听到这么多个词才出第一版草稿
+    draft_step_words: int = 2  # 比上一版草稿多出这么多个词才出下一版
     glossary: dict[str, str] = field(default_factory=dict)  # 术语表：原文 → 译法
     # 请求里额外附带的参数。DeepSeek 默认开启“思考模式”，会先思考再输出，同传必须关掉
     extra_body: dict = field(default_factory=lambda: {"thinking": {"type": "disabled"}})

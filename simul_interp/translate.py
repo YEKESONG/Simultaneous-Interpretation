@@ -4,6 +4,8 @@
 - UnitBuilder：纯逻辑，决定什么时候把攒下的原文送去翻译；
 - TranslationStage：把两者串起来，用小线程池并发翻译，一段慢了不会堵住后面的。
   说话人停下来想词时留下的半句话，也由它负责“先等一等”，等接上后面的话再翻译。
+  正在说的这一句还没说完时，它每隔几个词就把已经听到的部分译一版“草稿”显示出来（边说边译），
+  所以屏幕上的中文紧跟着法语走，不用等整句说完；整句定下来之后再换成正式译文。
 """
 
 from __future__ import annotations
@@ -33,6 +35,10 @@ _INITIAL = re.compile(r"^[A-ZÀ-ÖØ-Þ]\.$")
 # 等半句话的时候，离到点还有这么久才预先送去翻译：翻译服务出第一个字约要 0.7 秒（DEVLOG S11b），
 # 这样真到点时译文正好现成；说话人在这之前接着说了（多数情况），这次请求就省下了
 HOLD_SPECULATE_LEAD_S = 0.8
+# 等第一个字最多等多久。翻译服务繁忙时不会报错，而是让请求一直挂着（连接上不时发来一行空的“保持连接”），
+# 能挂好几分钟。草稿过了几秒就没用了，而且同一时刻只请求一版，卡住一版后面的就都出不来，所以期限要短
+FIRST_TOKEN_TIMEOUT_S = 12.0
+DRAFT_FIRST_TOKEN_TIMEOUT_S = 4.0
 
 
 def ends_sentence(word: str) -> bool:
@@ -103,27 +109,46 @@ class ChatTranslator:
             lines += [f"- {src} → {dst}" for src, dst in self.cfg.glossary.items()]
         return "\n".join(lines)
 
-    def messages(self, source: str, context: list[str]) -> list[dict]:
+    def messages(self, source: str, context: list[str], draft: bool = False, previous: str = "") -> list[dict]:
+        """draft：source 是一句还没说完的话的开头，要的是“到目前为止”的译文草稿；
+        previous：上一版草稿。让模型尽量沿用它，屏幕上已经显示的字才不会每次都换个说法（DEVLOG S21）。"""
         # 系统提示词保持不变，上文放在用户消息里：固定的开头部分能被服务商缓存，更快也更便宜
-        user = source
-        if context:
+        if draft:
+            # 草稿不带上文：带上的话，模型常把上文也当成“这句话”的一部分译进来，有时甚至只译了上文（S21 实测）。
+            # 草稿只显示一两秒就会被下一版或正式译文换掉，用不着上文；正式译文照常带
+            user = "「」里是一句还没说完的话的开头，说话人还在往下说。只翻译「」里的内容：\n"
+            user += f"「{source}」\n要求：\n"
+            if previous:
+                user += f"- 上一版译文是「{previous}」。前面已经译对的部分照抄，读的人才能接着往下看；只有译错或者读不通的地方才改；\n"
+            user += "- 译文要从「」里的第一个词译到最后一个词，不要只输出新增的部分；\n"
+            user += "- 不要补全还没说出来的内容，结尾不要加句号；末尾还悬着、暂时译不出的词先不译，不要用省略号占位。"
+        elif context:
             user = "上文（仅供参考，不要翻译）：\n" + "\n".join(context) + "\n\n需要翻译：\n" + source
+        else:
+            user = source
         return [{"role": "system", "content": self.system_prompt()}, {"role": "user", "content": user}]
 
-    def stream(self, source: str, context: list[str] | None = None) -> Iterator[str]:
+    def stream(
+        self, source: str, context: list[str] | None = None, draft: bool = False, previous: str = ""
+    ) -> Iterator[str]:
         body = {
             "model": self.cfg.model,
-            "messages": self.messages(source, context or []),
+            "messages": self.messages(source, context or [], draft, previous),
             "stream": True,
             "temperature": self.cfg.temperature,
             "max_tokens": 400,
             **self.cfg.extra_body,
         }
-        with self._client.stream("POST", "/chat/completions", json=body) as response:
+        limit = DRAFT_FIRST_TOKEN_TIMEOUT_S if draft else FIRST_TOKEN_TIMEOUT_S
+        timeout = httpx.Timeout(10.0, read=limit)
+        started, waiting = now(), True
+        with self._client.stream("POST", "/chat/completions", json=body, timeout=timeout) as response:
             if response.status_code != 200:
                 response.read()
                 raise TranslationError(f"翻译 API 返回 HTTP {response.status_code}：{response.text[:300]}")
             for line in response.iter_lines():
+                if waiting and now() - started > limit:  # 连接没断，但一直只有“保持连接”的空行
+                    raise TranslationError(f"翻译服务 {limit:.0f} 秒没有开始返回译文")
                 if not line.startswith("data:"):
                     continue
                 data = line[5:].strip()
@@ -132,6 +157,7 @@ class ChatTranslator:
                 choices = json.loads(data).get("choices") or []
                 delta = (choices[0].get("delta") or {}).get("content") if choices else None
                 if delta:
+                    waiting = False
                     yield delta
 
 
@@ -144,9 +170,15 @@ class MockTranslator:
     def warm_up(self) -> None:
         pass
 
-    def stream(self, source: str, context: list[str] | None = None) -> Iterator[str]:
+    def stream(
+        self, source: str, context: list[str] | None = None, draft: bool = False, previous: str = ""
+    ) -> Iterator[str]:
         time.sleep(0.3)  # 模拟网络和首字延迟
-        for char in f"〔模拟译文〕{source}":
+        text = f"〔模拟译文〕{source}"
+        if draft:  # 草稿很短，真实的接口几乎是一下子全出来的
+            yield text
+            return
+        for char in text:
             time.sleep(self.delay_s)
             yield char
 
@@ -229,6 +261,11 @@ class UnitBuilder:
         return 0
 
 
+def clean_draft(text: str) -> str:
+    """译文草稿：话还没说完，结尾不该有句号（提示词里要求了，模型偶尔还是会加）。"""
+    return text.strip().rstrip("。.")
+
+
 def unit_key(text: str) -> tuple[str, ...]:
     """比较两段原文是否“同一句”：忽略大小写和标点。"""
     return tuple(norm(word) for word in text.split())
@@ -245,10 +282,22 @@ class TranslationUnit:
     error: str = ""
     speculative: bool = False  # 译文是否来自投机翻译
     audio_start: float | None = None  # 这段原文在音频流（也就是录音）里大约从第几秒开始；不知道时为 None
+    placeholder: str = ""  # 这句话切出来之前屏幕上显示着的译文草稿；正式译文出来之前先接着显示它
 
     @property
     def done(self) -> bool:
         return self.done_at is not None
+
+    @property
+    def tentative(self) -> bool:
+        """屏幕上显示的还是草稿：正式译文还没追上草稿的长度。"""
+        return not self.done and len(self.translation) < len(self.placeholder)
+
+    @property
+    def shown(self) -> str:
+        """屏幕上该显示的译文。正式译文追上草稿的长度之前先显示草稿：
+        否则这句话一切出来，下面的中文就会先消失、过一会儿再从头出现。"""
+        return self.placeholder if self.tentative else self.translation
 
 
 @dataclass
@@ -266,20 +315,38 @@ class SpeculativeJob:
     unit: TranslationUnit | None = None  # 被哪个正式单元采用了
 
 
+@dataclass
+class DraftJob:
+    """正在说的这句话还没说完：先把已经听到的部分译一版，显示在“正在说”那一行下面。"""
+
+    source: str
+    key: tuple[str, ...]
+    context: list[str]
+    previous: str  # 上一版草稿，让模型尽量沿用
+    seq: int  # 第几版，显示时新的压过旧的
+    translation: str = ""
+    cancelled: bool = False
+
+
 class TranslationStage:
     def __init__(
         self,
         translator: ChatTranslator | MockTranslator | None,
         on_update: Callable[[TranslationUnit], None],
         context_sentences: int = 3,
-        max_workers: int = 4,
+        max_workers: int = 6,
         speculative: bool = False,
         on_speculation: Callable[[str], None] | None = None,
         max_speculative_words: int = 12,
         incomplete_wait_s: float = 0.0,
         on_flush: Callable[[], None] | None = None,
+        live_draft: bool = False,
+        draft_min_words: int = 3,
+        draft_step_words: int = 2,
     ) -> None:
-        """speculative：开启投机翻译；on_speculation(译文) 在投机译文更新时调用，用来显示在“正在说”那一行。
+        """speculative：开启投机翻译；on_speculation(译文) 在“正在说”那一行的译文更新时调用（投机译文或草稿）。
+        live_draft：边说边译。正在说的这句话还没说完，就每隔几个词把已经听到的部分译一版草稿显示出来。
+        draft_min_words：这句话至少有这么多个词才出第一版草稿；draft_step_words：比上一版多出这么多个词才出下一版。
         max_speculative_words：凑成单元还需要超过这么多个暂定词时不投机（暂定部分太长，多半不可靠）。
         incomplete_wait_s：一段话说完时剩下的半句（结尾不是句号、问号）先不送去翻译，等说话人接着说；
         安静了这么多秒还没下文才送。0 = 不等，说完就送。
@@ -292,7 +359,10 @@ class TranslationStage:
         self.max_speculative_words = max_speculative_words
         self.incomplete_wait_s = incomplete_wait_s
         self.on_flush = on_flush or (lambda: None)
-        self.stats = {"speculated": 0, "adopted": 0}
+        self.live_draft = live_draft and translator is not None
+        self.draft_min_words = draft_min_words
+        self.draft_step_words = draft_step_words
+        self.stats = {"speculated": 0, "adopted": 0, "drafted": 0}
         self._context: deque[str] = deque(maxlen=context_sentences)
         self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="translate")
         self._next_id = 0
@@ -301,6 +371,16 @@ class TranslationStage:
         self._utterances = 0  # 已经开口、还没处理完的话有几段；> 0 表示说话人正在说
         self._hold_timer: threading.Timer | None = None
         self._hold_token = 0  # 每次开始等、取消等都加 1，让已经在路上的定时器作废
+        # “正在说”那一行下面显示的译文（投机译文或草稿）。几个任务可能同时在跑，按发起的先后编号，新的压过旧的
+        self._seq = 0
+        self._live_text = ""
+        self._live_seq = 0  # 现在显示的这份译文是哪个任务出的
+        self.live_covered = 0  # 现在显示的这份译文，是照着当前句的前几个词译的（测延迟用）
+        self._live_words: list[str] = []  # 当前句目前听到的词（已确认的 + 暂定的）
+        self._live_settled = False  # 这段话已经说完了（留着的半句）：有一个词没译进草稿也要再出一版
+        self._draft: DraftJob | None = None  # 正在请求的草稿；同一时刻只请求一版，回来了再决定要不要下一版
+        self._drafted: tuple[str, ...] = ()  # 上一版草稿是照着哪些词译的
+        self._draft_text = ""  # 上一版草稿的译文
 
     @property
     def pending(self) -> str:
@@ -320,11 +400,10 @@ class TranslationStage:
             self._context.clear()
 
     @property
-    def speculative_translation(self) -> str:
-        """当前投机翻译的译文（还没被正式单元采用的），没有则为空。"""
+    def live_translation(self) -> str:
+        """“正在说”那一行下面现在该显示的译文（投机译文或草稿），没有则为空。"""
         with self._lock:
-            job = self._spec
-            return job.translation.strip() if job is not None and not job.cancelled else ""
+            return self._live_text
 
     def feed(self, committed: str, final: bool, word_times: list[float] | None = None) -> list[TranslationUnit]:
         """把新确认的原文交给翻译阶段，返回因此新建的翻译单元。
@@ -338,6 +417,8 @@ class TranslationStage:
         units = [self._emit(source, start) for source, start in pieces]
         if final:
             self._hold()
+            if self.live_draft:  # 留下的半句：这段话已经说完，不会再有新词来凑数了，草稿要译到最后一个词
+                self._want_draft(self.pending.split(), settled=True)
         return units
 
     def speech_started(self) -> None:
@@ -354,6 +435,8 @@ class TranslationStage:
             context = list(self._context)
             self._context.append(source)
             job = self._adopt_speculation(unit)
+            unit.placeholder = self._live_text  # 屏幕上正显示着的草稿：正式译文出来之前接着显示
+            self._reset_live()
         if self.translator is None:  # 不翻译（没有密钥）：只有原文，直接算完成
             unit.done_at = unit.ready_at
             self.on_update(unit)
@@ -413,16 +496,23 @@ class TranslationStage:
     # ---- 投机翻译 ----
 
     def speculate(self, partial: str) -> None:
-        """在“已确认但还没送出的词 + 暂定尾巴”里找第一个翻译单元；找到就先送去翻译。"""
-        if not self.speculative:
+        """每次识别结果更新时调用，看“已确认但还没送出的词 + 暂定尾巴”：
+        - 投机翻译：里面已经能凑成一个翻译单元（看上去说完了一句）就先送去翻译。译文不显示，
+          留着等原文确认时直接用——暂定文字末尾的句号常常是假的，这时候的“整句”多半还会接着长；
+        - 边说边译：不管这句话说没说完，都把目前听到的部分译一版草稿显示出来。"""
+        if not (self.speculative or self.live_draft):
             return
         with self._lock:
             pending = list(self.builder.pending)
         words = pending + partial.split()
         size = self.builder.first_unit(words)
-        if size <= len(pending) or size - len(pending) > self.max_speculative_words:
-            return
-        self._start_speculation(" ".join(words[:size]))
+        if self.speculative and size > len(pending) and size - len(pending) <= self.max_speculative_words:
+            self._start_speculation(" ".join(words[:size]))
+        if self.live_draft:
+            # 暂定文字最末尾那个词最不可靠（实测 28% 之后会变，往前的约 15%）：草稿先不译它，等下一次识别
+            steady = words[:-1] if len(words) > len(pending) else words
+            size = self.builder.first_unit(steady)
+            self._want_draft(steady[:size] if size else steady)
 
     def _start_speculation(self, source: str) -> None:
         key = unit_key(source)
@@ -470,12 +560,8 @@ class TranslationStage:
                     if unit is not None:
                         unit.translation = job.translation
                         unit.first_token_at = unit.first_token_at or job.first_token_at
-                    text = job.translation.strip()
-                    still_live = unit is None and self._spec is job  # 还没被采用、也没被新的投机替换
                 if unit is not None:
                     self.on_update(unit)
-                elif still_live:
-                    self.on_speculation(text)
         except Exception as exc:
             job.error = str(exc)
             logger.warning("投机翻译失败：%s", exc)
@@ -491,16 +577,113 @@ class TranslationStage:
         if unit is not None:
             self.on_update(unit)
 
-    def _translate(self, unit: TranslationUnit, context: list[str]) -> None:
+    # ---- 边说边译：当前句的译文草稿 ----
+
+    def _offer_live(self, seq: int, text: str, covered: int, complete: bool) -> str | None:
+        """（持锁调用）某个任务出了新的译文，决定屏幕上要不要换。要换就返回新的文字，否则返回 None。
+        - 更早发起的任务不能盖掉更晚的；
+        - 新任务的译文是一个字一个字来的：追上屏幕上那份的长度之前先不换，否则这一行会先缩短再变长，看着是在闪。"""
+        if seq < self._live_seq or (seq == self._live_seq and text == self._live_text):
+            return None
+        if seq > self._live_seq and not complete and len(text) < len(self._live_text):
+            return None
+        self._live_text, self._live_seq, self.live_covered = text, seq, covered
+        return text
+
+    def _reset_live(self) -> None:
+        """（持锁调用）当前句切成单元送走了：它下面的译文和草稿都不再属于“正在说”的那一句。"""
+        if self._draft is not None:
+            self._draft.cancelled = True
+            self._draft = None
+        self._seq += 1  # 已经发起的任务编号都比它小，再回来也不会显示
+        self._live_text, self._live_seq, self.live_covered = "", self._seq, 0
+        self._live_words, self._live_settled, self._drafted, self._draft_text = [], False, (), ""
+
+    def _want_draft(self, words: list[str], settled: bool = False) -> None:
+        with self._lock:
+            self._live_words, self._live_settled = words, settled
+            job = self._next_draft()
+        if job is not None:
+            self._submit_draft(job)
+
+    def _next_draft(self) -> DraftJob | None:
+        """（持锁调用）要不要出下一版草稿。同一时刻只请求一版：请求一次约 1 秒，这期间又多出来的词，
+        等它回来再一起译；这样请求的节奏自然跟着翻译服务的速度走，不会越积越多。"""
+        words = self._live_words
+        if self._draft is not None or len(words) < (1 if self._live_settled else self.draft_min_words):
+            return None
+        key = unit_key(" ".join(words))
+        same = 0
+        for new, old in zip(key, self._drafted):
+            if new != old:
+                break
+            same += 1
+        if len(key) - same < (1 if self._live_settled else self.draft_step_words):
+            return None  # 比上一版多出来（或者改了）的词还不够多
+        self._seq += 1
+        # 暂定文字末尾的句号、省略号多半是识别模型顺手加的，不代表话说完了：不给翻译模型看，免得它也跟着收尾
+        source = " ".join(words).rstrip(".… ")
+        job = DraftJob(source, key, list(self._context), self._draft_text if same else "", self._seq)
+        self._draft = job
+        self.stats["drafted"] += 1
+        return job
+
+    def _submit_draft(self, job: DraftJob) -> None:
         try:
-            for delta in self.translator.stream(unit.source, context):
-                if unit.first_token_at is None:
-                    unit.first_token_at = now()
-                unit.translation += delta
-                self.on_update(unit)
-        except Exception as exc:  # 翻译失败只影响这一句，不能让整个程序停下
-            unit.error = str(exc)
-            logger.error("翻译失败：%s", exc)
+            self._pool.submit(self._run_draft, job)
+        except RuntimeError:  # 正在退出，线程池已经关了
+            job.cancelled = True
+
+    def _run_draft(self, job: DraftJob) -> None:
+        failed = False
+        stream = self.translator.stream(job.source, job.context, draft=True, previous=job.previous)
+        try:
+            for delta in stream:
+                if job.cancelled:
+                    return  # 这句话已经切走了；退出前 finally 会关掉 HTTP 流
+                job.translation += delta
+                with self._lock:
+                    shown = None
+                    if not job.cancelled:
+                        shown = self._offer_live(job.seq, clean_draft(job.translation), len(job.key), False)
+                if shown is not None:
+                    self.on_speculation(shown)
+        except Exception as exc:  # 草稿失败不要紧：这句话说完后还有正式译文
+            failed = True
+            logger.info("这一版译文草稿没有成功：%s", exc)
+        finally:
+            stream.close()
+        with self._lock:
+            if job.cancelled:
+                return
+            self._draft = None
+            self._drafted = job.key  # 失败了也记下：同样的词不再重试，等有了新词再出下一版
+            shown = None
+            if not failed:
+                self._draft_text = clean_draft(job.translation)
+                shown = self._offer_live(job.seq, self._draft_text, len(job.key), True)
+            following = self._next_draft()
+        if shown is not None:
+            self.on_speculation(shown)
+        if following is not None:
+            self._submit_draft(following)
+
+    def _translate(self, unit: TranslationUnit, context: list[str]) -> None:
+        for attempt in (1, 2):
+            try:
+                for delta in self.translator.stream(unit.source, context):
+                    if unit.first_token_at is None:
+                        unit.first_token_at = now()
+                    unit.translation += delta
+                    self.on_update(unit)
+                break
+            except Exception as exc:  # 翻译失败只影响这一句，不能让整个程序停下
+                if attempt == 1 and not unit.translation:  # 一个字都没出来（比如服务繁忙、迟迟不回）：再试一次
+                    logger.warning("翻译没有成功，重试一次：%s", exc)
+                    continue
+                unit.error = str(exc)
+                logger.error("翻译失败：%s", exc)
+                break
         unit.translation = unit.translation.strip()
         unit.done_at = now()
         self.on_update(unit)
@@ -514,6 +697,7 @@ class TranslationStage:
         with self._lock:
             if self._spec is not None:
                 self._spec.cancelled = True
+            self._reset_live()
         self._pool.shutdown(wait=True)
         if self.translator is not None:
             self.translator.close()

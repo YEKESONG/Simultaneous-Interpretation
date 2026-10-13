@@ -11,7 +11,14 @@ from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from simul_interp.config import UiConfig  # noqa: E402
-from simul_interp.ui.overlay import PILL_SIZE, STREAM_FALLBACK_S, WAIT_FALLBACK_S, Overlay, UnitSnapshot  # noqa: E402
+from simul_interp.ui.overlay import (  # noqa: E402
+    DRAFT_COLOR,
+    PILL_SIZE,
+    STREAM_FALLBACK_S,
+    WAIT_FALLBACK_S,
+    Overlay,
+    UnitSnapshot,
+)
 
 
 def make_overlay(tmp_path, **ui):
@@ -63,6 +70,34 @@ def test_live_text_goes_to_the_slot_with_blank_translation(overlay):
     assert "Bonjour à" in source and "tous" in source
     assert translation == ""  # 译文的位置先留白
     assert overlay.hearing
+
+
+def test_draft_translation_is_shown_under_the_sentence_being_spoken(overlay):
+    fill(overlay, 2)
+    history_before = [item.html for item in overlay.captions._items]
+    overlay.set_live("Nous allons", "voir", "我们要")  # 话还没说完，已经有一版译文草稿
+    overlay.refresh()
+    source, translation = overlay.captions._slot_html
+    assert "Nous allons" in source and "我们要" in translation and DRAFT_COLOR in translation  # 比正式译文暗一点
+    overlay.set_live("Nous allons voir", "la suite", "我们要看看")  # 草稿跟着往下长
+    overlay.refresh()
+    assert "我们要看看" in overlay.captions._slot_html[1]
+    assert [item.html for item in overlay.captions._items] == history_before  # 只在当前句区域里变，历史不动
+
+
+def test_pair_showing_a_draft_makes_room_as_soon_as_the_next_sentence_starts(overlay):
+    drafted = UnitSnapshot(0, "phrase 0", "草稿", False, "", True)  # 正式译文还没到，先顶着草稿
+    overlay.set_unit(drafted)
+    overlay.set_live("", "")
+    assert overlay.compose() == ([], ("unit", drafted))  # 下一句没开始：留在当前句区域
+    overlay.refresh()
+    assert DRAFT_COLOR in overlay.captions._slot_html[1]
+    overlay.set_live("", "suite", "")  # 下一句开始了：不用等正式译文，马上让出当前句区域
+    history, slot = overlay.compose()
+    assert [u.id for u in history] == [0] and slot == ("live", "", "suite")
+    overlay.set_unit(unit(0, "正式译文。", done=True))  # 正式译文到了：在历史里原地换掉草稿
+    settle(overlay)
+    assert "正式译文。" in overlay.captions._items[-1].html and DRAFT_COLOR not in overlay.captions._items[-1].html
 
 
 def test_translation_fills_the_blank_then_pair_waits_for_next_sentence(overlay):

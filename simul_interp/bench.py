@@ -111,15 +111,30 @@ def bench_translate(cfg: Config, sentences_file: Path | None = None) -> int:
 
 
 class RecordingView:
-    """基准测试用的“界面”：记下每个翻译单元的最终状态，同时把译文打印出来。"""
+    """基准测试用的“界面”：记下每个翻译单元的最终状态，同时把译文打印出来。
+    另外记下屏幕上的法语和译文各显示到了整场的第几个词，用来算“看到法语之后多久能看到中文”（display_lag）。"""
 
     def __init__(self) -> None:
         self.units: dict = {}
         self._printed: set[int] = set()
         self._lock = threading.Lock()
+        self.stage = None  # 翻译阶段（TranslationStage）：向它问“当前句的译文是照着前几个词译的”
+        self.timeline: list[tuple[float, int, int]] = []  # (时刻, 法语显示到第几个词, 译文覆盖到第几个词)
+        self._unit_end: dict[int, int] = {}  # 每个翻译单元的最后一个词是整场的第几个词
+        self._emitted = 0  # 已经切成翻译单元的词数
+        self._shown = 0
+        self._covered = 0
+
+    def _mark(self, shown: int, covered: int) -> None:
+        self._shown, self._covered = max(self._shown, shown), max(self._covered, covered)
+        self.timeline.append((now(), self._shown, self._covered))
 
     def on_live(self, pending: str, partial: str, translation: str = "") -> None:
-        pass
+        with self._lock:
+            covered = 0
+            if translation and self.stage is not None:  # 当前句下面显示着译文
+                covered = self._emitted + getattr(self.stage, "live_covered", 0)
+            self._mark(self._emitted + len(pending.split()) + len(partial.split()), covered)
 
     def on_status(self, text: str) -> None:
         if text:
@@ -128,10 +143,28 @@ class RecordingView:
     def on_unit(self, unit) -> None:
         with self._lock:
             self.units[unit.id] = unit
+            if unit.id not in self._unit_end:
+                self._emitted += len(unit.source.split())
+                self._unit_end[unit.id] = self._emitted
+            if unit.translation:  # 这个单元的正式译文开始出现了
+                self._mark(self._shown, self._unit_end[unit.id])
             if unit.done and unit.id not in self._printed:
                 self._printed.add(unit.id)
                 mark = "（投机命中）" if unit.speculative else ""
                 print(f"#{unit.id} {unit.source}\n    → {unit.translation or unit.error}{mark}", flush=True)
+
+
+def display_lag(timeline: list[tuple[float, int, int]]) -> list[float]:
+    """每个词：从它（法语）出现在屏幕上，到屏幕上出现包含它的译文，隔了多少秒。
+    这是用户实际感受到的延迟：一句话越长、译文出得越晚，句子开头那几个词等得就越久。"""
+    seen: dict[int, float] = {}
+    translated: dict[int, float] = {}
+    for moment, shown, covered in timeline:
+        for index in range(len(seen) + 1, shown + 1):
+            seen[index] = moment
+        for index in range(len(translated) + 1, covered + 1):
+            translated[index] = moment
+    return [max(0.0, translated[index] - seen[index]) for index in seen if index in translated]
 
 
 def bench_pipeline(cfg: Config, path: Path, speed: float = 1.0, mock: bool = False) -> int:
@@ -144,6 +177,7 @@ def bench_pipeline(cfg: Config, path: Path, speed: float = 1.0, mock: bool = Fal
     cfg.audio.source, cfg.audio.file, cfg.audio.file_speed = "file", str(path), speed
     view = RecordingView()
     interpreter = Interpreter(cfg, view, mock_translate=mock, save_transcript=False, save_recording=False)
+    view.stage = interpreter.translation
     interpreter.backend.load()  # 和流水线里的识别在同一个线程（MLX 的要求）
     ref = reference_words(interpreter.backend, path, cfg.asr.model)
     ref_text = [w for _, _, w in ref]
@@ -178,6 +212,8 @@ def bench_pipeline(cfg: Config, path: Path, speed: float = 1.0, mock: bool = Fal
     print(f"原文确认、送去翻译：{summarize(confirmed)}")
     print(f"屏幕上开始出现中文：{summarize(first_zh)}")
     print(f"中文全部译完：{summarize(done_zh)}")
+    print("\n==== 看到法语之后多久能看到中文（每个词：它出现在屏幕上 → 屏幕上出现包含它的译文）====")
+    print(summarize(display_lag(view.timeline)))
     if cfg.translate.speculative:
         print(f"投机翻译：发起 {stats['speculated']} 次，命中 {stats['adopted']} 次（共 {len(units)} 段）")
     return 0

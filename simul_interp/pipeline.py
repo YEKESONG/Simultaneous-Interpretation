@@ -32,7 +32,7 @@ CONFIRM_LAG_S = 2.0
 class View(Protocol):
     def on_live(self, pending: str, partial: str, translation: str = "") -> None:
         """正在说的话：pending = 已确认但还没送去翻译的法语，partial = 还没确认的暂定尾巴，
-        translation = 这句的投机译文（还没确认，可能会变）。"""
+        translation = 这句话到目前为止的译文（草稿或投机译文：话还没说完、原文还没确认，可能会变）。"""
 
     def on_unit(self, unit: TranslationUnit) -> None:
         """一段原文送去翻译（译文为空）、译文流式更新、翻译完成时都会调用。"""
@@ -81,6 +81,9 @@ class Interpreter:
             max_speculative_words=cfg.translate.speculative_max_words,
             incomplete_wait_s=cfg.translate.incomplete_wait_s,
             on_flush=self._on_flush,
+            live_draft=cfg.translate.live_draft,
+            draft_min_words=cfg.translate.draft_min_words,
+            draft_step_words=cfg.translate.draft_step_words,
         )
         self._live = ("", "")  # 最近一次的 (pending, partial)，投机译文更新时要一起重新显示
         self.asr = AsrRunner(cfg, self.backend, self._on_asr, on_speech_start=self.translation.speech_started)
@@ -237,7 +240,7 @@ class Interpreter:
         if not update.final:
             self.translation.speculate(update.partial)
         self._live = (self.translation.pending, update.partial)
-        self.view.on_live(*self._live, self.translation.speculative_translation)
+        self.view.on_live(*self._live, self.translation.live_translation)
 
     def _on_speculation(self, text: str) -> None:
         self.view.on_live(*self._live, text)
