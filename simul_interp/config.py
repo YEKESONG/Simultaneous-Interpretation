@@ -59,6 +59,9 @@ class TranslateConfig:
     # 中文能早出现约一次确认的时间；文字变了会重翻，所以偶尔多花一次 API 调用
     speculative: bool = True
     speculative_max_words: int = 12  # 凑成一句还要靠超过这么多个暂定词时不投机（暂定部分太长多半不可靠）
+    # 说话人停下来想词时留下的半句话（结尾不是句号、问号）先不翻译，等他接着说，接上了再一起翻；
+    # 安静了这么多秒还没有下文才送去翻译。实测多等 1.5 秒能接上约 87% 的半句（DEVLOG S16）。0 = 不等
+    incomplete_wait_s: float = 1.5
     glossary: dict[str, str] = field(default_factory=dict)  # 术语表：原文 → 译法
     # 请求里额外附带的参数。DeepSeek 默认开启“思考模式”，会先思考再输出，同传必须关掉
     extra_body: dict = field(default_factory=lambda: {"thinking": {"type": "disabled"}})

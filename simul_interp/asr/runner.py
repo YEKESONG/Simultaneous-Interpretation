@@ -24,10 +24,18 @@ logger = logging.getLogger(__name__)
 
 
 class AsrRunner:
-    def __init__(self, cfg: Config, backend: AsrBackend, on_update: Callable[[AsrUpdate], None]) -> None:
+    def __init__(
+        self,
+        cfg: Config,
+        backend: AsrBackend,
+        on_update: Callable[[AsrUpdate], None],
+        on_speech_start: Callable[[], None] | None = None,
+    ) -> None:
+        """on_speech_start：语音检测一发现有人开口就调用（在 listen 线程里，比识别结果早近一秒）。"""
         self.cfg = cfg
         self.backend = backend
         self.on_update = on_update
+        self.on_speech_start = on_speech_start
         self._events: queue.Queue[VadEvent | None] = queue.Queue()
         self._stop = threading.Event()
 
@@ -61,6 +69,8 @@ class AsrRunner:
                     break
                 last = chunk.end
                 for event in segmenter.process(chunk, vad(chunk.samples)):
+                    if event.type == "start" and self.on_speech_start is not None:
+                        self.on_speech_start()
                     self._events.put(event)
             for event in segmenter.flush(last):
                 self._events.put(event)

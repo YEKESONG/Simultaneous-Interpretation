@@ -71,9 +71,11 @@ class Interpreter:
             speculative=cfg.translate.speculative,
             on_speculation=self._on_speculation,
             max_speculative_words=cfg.translate.speculative_max_words,
+            incomplete_wait_s=cfg.translate.incomplete_wait_s,
+            on_flush=self._on_flush,
         )
         self._live = ("", "")  # 最近一次的 (pending, partial)，投机译文更新时要一起重新显示
-        self.asr = AsrRunner(cfg, self.backend, self._on_asr)
+        self.asr = AsrRunner(cfg, self.backend, self._on_asr, on_speech_start=self.translation.speech_started)
 
         # 内录的会话按开始时间命名，录音和会话记录用同一个名字，方便配对；
         # 用音频文件做输入时，记录跟着文件名走，也不用再录一份（文件本身就是录音）
@@ -177,6 +179,11 @@ class Interpreter:
 
     def _on_speculation(self, text: str) -> None:
         self.view.on_live(*self._live, text)
+
+    def _on_flush(self) -> None:
+        """等了一阵没有下文，留着的半句已经送去翻译：界面上“正在说”的那一行要清掉。"""
+        self._live = (self.translation.pending, "")
+        self.view.on_live(*self._live, "")
 
     def _on_unit(self, unit: TranslationUnit) -> None:
         self.view.on_unit(unit)

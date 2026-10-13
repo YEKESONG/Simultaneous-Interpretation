@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from simul_interp.config import TranslateConfig
+from simul_interp import translate
 from simul_interp.translate import ChatTranslator, TranslationError, TranslationStage, UnitBuilder
 
 
@@ -157,3 +158,110 @@ def test_stage_translates_in_background_and_reports_progress():
     assert unit.done and unit.translation == "大家好。" and unit.error == ""
     assert unit.first_token_at is not None and unit.first_token_at >= unit.ready_at
     assert updates[0] is unit  # 送去翻译时先通知一次（此时只有原文）
+
+
+def test_ellipsis_and_initials_do_not_end_a_sentence():
+    b = UnitBuilder()
+    assert b.add("Alors je voudrais vous présenter aujourd'hui le...", False) == []  # 省略号：说话人拖着音，话还没说完
+    assert b.add("le plan du projet.", False) == ["Alors je voudrais vous présenter aujourd'hui le... le plan du projet."]
+    assert b.add("M. Dupont est là.", False) == ["M. Dupont est là."]  # “M.” 是缩写，不是句子的结尾
+    # 省略号后面多半是一次想词的停顿：11 个词的半句不在这里切（逗号的话 8 个词就切了），等他接着说
+    assert b.add("le train de neuf heures part toujours du quai numéro trois...", False) == []
+    assert b.add("sauf le dimanche.", False) == [
+        "le train de neuf heures part toujours du quai numéro trois... sauf le dimanche."
+    ]
+    rambling = "et puis le marché du samedi matin est toujours plein de gens qui viennent pour..."
+    assert b.add(rambling, False) == [rambling]  # 已经 15 个词了：够长，可以先送去翻译
+
+
+def test_overlong_stretch_is_cut_at_the_last_pause_not_mid_phrase():
+    """一口气说了 25 个词还没有句号，必须切了：切在最后一个省略号或逗号之后，而不是正好第 25 个词那里。"""
+    b = UnitBuilder()
+    head = "le train de neuf heures part toujours du quai trois..."  # 10 个词，结尾拖着音
+    rest = " ".join(f"mot{i}" for i in range(15))
+    assert b.add(f"{head} {rest}", False) == [head]
+    assert b.pending == rest.split()  # 后半截接着攒
+    assert b.first_unit(f"{head} {rest}".split()) == 10  # 投机翻译用同一套切法
+    plain = " ".join(f"mot{i}" for i in range(30))
+    assert UnitBuilder().add(plain, False) == [" ".join(plain.split()[:25])]  # 一个标点都没有：只能硬切
+
+
+def collector():
+    """记下每个翻译单元（同一个单元会通知好几次，只留一份）。"""
+    seen = {}
+    return seen, lambda unit: seen.setdefault(unit.id, unit)
+
+
+def test_unfinished_sentence_waits_for_the_speaker_to_continue():
+    """说话人说了半句、停下来想词：这半句先不翻译，等接上后面的话再一起翻。"""
+    translator = ScriptedTranslator()
+    stage = TranslationStage(translator, lambda unit: None, incomplete_wait_s=30)
+    assert stage.feed("Alors je voudrais vous présenter aujourd'hui le...", final=True) == []  # 这段话停了，但句子没说完
+    assert stage.pending == "Alors je voudrais vous présenter aujourd'hui le..."  # 留着，界面上仍然显示在“正在说”那一行
+    stage.speech_started()
+    units = stage.feed("le plan du projet.", final=True)
+    stage.close()
+    whole = "Alors je voudrais vous présenter aujourd'hui le... le plan du projet."
+    assert [u.source for u in units] == [whole]
+    assert translator.calls == [whole]  # 只翻译了一次，翻的是完整的一句
+
+
+def test_unfinished_sentence_is_sent_after_waiting_long_enough():
+    seen, on_update = collector()
+    flushed = []
+    stage = TranslationStage(ScriptedTranslator(), on_update, incomplete_wait_s=0.2, on_flush=lambda: flushed.append(1))
+    stage.feed("et ensuite nous", final=True)
+    assert not seen and stage.pending  # 还在等
+    assert wait_for(lambda: flushed)  # 等够了还没有下文：送去翻译，并通知界面清掉“正在说”那一行
+    stage.close()
+    assert seen[0].source == "et ensuite nous" and seen[0].translation.startswith("译")
+    assert stage.pending == ""
+
+
+def test_speaker_resuming_cancels_the_wait():
+    seen, on_update = collector()
+    stage = TranslationStage(ScriptedTranslator(), on_update, incomplete_wait_s=0.15)
+    stage.feed("et ensuite nous", final=True)
+    stage.speech_started()  # 很快又开口了：语音检测比识别结果早知道近一秒
+    time.sleep(0.4)
+    assert not seen  # 只要还在说就一直等，不会说到一半把前半句送走
+    stage.feed("allons au marché.", final=True)
+    stage.close()
+    assert [u.source for u in seen.values()] == ["et ensuite nous allons au marché."]
+
+
+def test_no_wait_starts_if_the_speaker_has_already_resumed():
+    """实际的先后顺序可能是：语音检测已经发现下一段话开始了，上一段话的识别结果才处理完。"""
+    seen, on_update = collector()
+    stage = TranslationStage(ScriptedTranslator(), on_update, incomplete_wait_s=0.1)
+    stage.speech_started()  # 第一段话
+    stage.speech_started()  # 第二段话已经开始了
+    stage.feed("et ensuite nous", final=True)  # 第一段话的结果这时才到
+    time.sleep(0.3)
+    assert not seen
+    stage.feed("allons au marché.", final=True)
+    stage.close()
+    assert len(seen) == 1
+
+
+def test_closing_sends_what_is_still_waiting():
+    seen, on_update = collector()
+    stage = TranslationStage(ScriptedTranslator(), on_update, incomplete_wait_s=30)
+    stage.feed("et ensuite nous", final=True)
+    stage.close()  # 退出时还在等的半句不能丢
+    assert seen[0].source == "et ensuite nous" and seen[0].done
+
+
+def test_waiting_fragment_is_translated_ahead_of_time(monkeypatch):
+    """快到点时先投机翻译：真到点、说话人没有接着说，译文已经现成，不用再多等一次请求。"""
+    monkeypatch.setattr(translate, "HOLD_SPECULATE_LEAD_S", 0.15)
+    translator = ScriptedTranslator()
+    seen, on_update = collector()
+    stage = TranslationStage(translator, on_update, speculative=True, incomplete_wait_s=0.3)
+    stage.feed("et ensuite nous", final=True)
+    time.sleep(0.05)
+    assert translator.calls == []  # 刚开始等的时候不请求：多数情况下说话人马上就接着说了
+    assert wait_for(lambda: seen)
+    stage.close()
+    assert translator.calls == ["et ensuite nous"] and seen[0].speculative  # 只请求了一次
+    assert stage.stats == {"speculated": 1, "adopted": 1}

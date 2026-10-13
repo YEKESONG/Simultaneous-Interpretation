@@ -17,11 +17,14 @@ from simul_interp.config import Config
 
 WORDS = "Bonjour à tous. Merci beaucoup.".split()
 TIMES = [(1.0, 1.3), (1.36, 1.66), (1.72, 2.02), (3.5, 3.8), (3.86, 4.3)]  # 每个词的 (开始, 结束) 秒
+# 另一段：说了半句（没有句号），停一秒，再接着说完
+HALTING_WORDS = "Nous allons voir la suite.".split()
+HALTING_TIMES = [(1.0, 1.3), (1.36, 1.66), (1.72, 2.02), (3.0, 3.3), (3.36, 3.8)]
 
 
-def make_audio():
+def make_audio(times=TIMES):
     audio = np.zeros(6 * SAMPLE_RATE, dtype=np.float32)
-    for k, (start, end) in enumerate(TIMES):
+    for k, (start, end) in enumerate(times):
         audio[int(start * SAMPLE_RATE) : int(end * SAMPLE_RATE)] = (k + 1) / 100
     return audio
 
@@ -29,8 +32,12 @@ def make_audio():
 class FakeSource(AudioSource):
     name = "测试音源"
 
+    def __init__(self, times=TIMES):
+        super().__init__()
+        self.times = times
+
     def start(self):
-        self._feed(make_audio())
+        self._feed(make_audio(self.times))
         self._finish()
 
     def stop(self):
@@ -45,6 +52,9 @@ class FakeVad:
 class LevelBackend:
     """假的识别后端：靠幅度认词；还没说完的词只“听”到前一半（模拟不稳定的尾巴）。"""
 
+    def __init__(self, words=WORDS):
+        self.words = words
+
     def load(self):
         pass
 
@@ -57,7 +67,7 @@ class LevelBackend:
         for a, b in zip(edges, edges[1:]):
             if levels[a] == 0:
                 continue
-            word = WORDS[levels[a] - 1]
+            word = self.words[levels[a] - 1]
             if b == len(levels):
                 word = word[: max(1, len(word) // 2)]
             current.append((a / SAMPLE_RATE, b / SAMPLE_RATE, word))
@@ -95,11 +105,13 @@ def read_wav(path):
 @pytest.fixture
 def session(tmp_path, monkeypatch):
     """返回一个函数：按给定的选项建一个 Interpreter（内录、不翻译），输出都写到临时目录。"""
-    monkeypatch.setattr(pipeline, "create_source", lambda cfg: FakeSource())
-    monkeypatch.setattr(pipeline, "create_backend", lambda cfg: LevelBackend())
+    script = {"words": WORDS, "times": TIMES}
+    monkeypatch.setattr(pipeline, "create_source", lambda cfg: FakeSource(script["times"]))
+    monkeypatch.setattr(pipeline, "create_backend", lambda cfg: LevelBackend(script["words"]))
     monkeypatch.setattr(runner, "SileroVad", FakeVad)
 
-    def make(cfg=None, **options):
+    def make(cfg=None, words=WORDS, times=TIMES, **options):
+        script.update(words=words, times=times)
         cfg = cfg or Config()
         cfg.transcript.dir = str(tmp_path / "记录")
         cfg.recording.dir = str(tmp_path / "录音")
@@ -158,3 +170,17 @@ def test_recording_failure_does_not_stop_interpretation(session):
     interpreter.run()
     assert "录音已停止：No space left on device" in view.status
     assert len(view.units) == 2  # 同传照常进行
+
+
+def test_unfinished_sentence_is_joined_with_its_continuation(session):
+    """说了半句、停一下、接着说完：默认合成一段再翻译；把等待关掉（0 秒）就和以前一样切成两段。"""
+    interpreter, view = session(words=HALTING_WORDS, times=HALTING_TIMES)
+    interpreter.run()
+    assert [view.units[i].source for i in sorted(view.units)] == ["Nous allons voir la suite."]
+    assert view.units[0].audio_start <= HALTING_TIMES[0][0]  # 时间仍然是这段话开头的位置
+
+    no_wait = Config()
+    no_wait.translate.incomplete_wait_s = 0
+    interpreter, view = session(no_wait, words=HALTING_WORDS, times=HALTING_TIMES)
+    interpreter.run()
+    assert [view.units[i].source for i in sorted(view.units)] == ["Nous allons voir", "la suite."]
