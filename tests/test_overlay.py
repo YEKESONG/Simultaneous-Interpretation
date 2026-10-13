@@ -11,7 +11,7 @@ from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from simul_interp.config import UiConfig  # noqa: E402
-from simul_interp.ui.overlay import STREAM_FALLBACK_S, WAIT_FALLBACK_S, Overlay, UnitSnapshot  # noqa: E402
+from simul_interp.ui.overlay import PILL_SIZE, STREAM_FALLBACK_S, WAIT_FALLBACK_S, Overlay, UnitSnapshot  # noqa: E402
 
 
 def make_overlay(tmp_path, **ui):
@@ -242,6 +242,40 @@ def test_resizing_rewraps_the_history(overlay):
     overlay.resize(420, 260)  # 窗口变窄：每一对要折成更多行
     QApplication.processEvents()
     assert overlay.captions.max_scroll() > before
+
+
+def test_collapse_to_a_pill_and_expand_again(overlay):
+    overlay.move(20, 300)
+    fill(overlay, 3)
+    before = overlay.geometry()
+    QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=overlay._collapse_button().center())  # 点右上角的“–”
+    assert overlay.collapsed and overlay.size().toTuple() == PILL_SIZE
+    assert overlay.geometry().bottomLeft() == before.bottomLeft()  # 小条留在原来窗口的左下角
+    assert not overlay.captions.isVisible()
+    overlay.set_unit(unit(3, "句子 3", done=True))  # 收起的时候照常收句子
+    overlay.set_live("", "encore")
+    overlay.refresh()
+    QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=QPoint(60, 15))  # 点小条：展开
+    assert not overlay.collapsed and overlay.geometry() == before  # 回到原来的位置和大小
+    assert overlay.captions.isVisible() and overlay.captions.history_keys() == [0, 1, 2, 3]  # 收起期间的句子补上了
+
+
+def test_dragging_the_pill_moves_it_instead_of_expanding(overlay):
+    overlay.move(20, 300)
+    QApplication.processEvents()
+    before = overlay.geometry()
+    overlay.set_collapsed(True)
+    start = QPoint(60, 15)
+    QTest.mousePress(overlay, Qt.MouseButton.LeftButton, pos=start)
+    QTest.mouseMove(overlay, start + QPoint(40, -30))
+    QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, pos=start)  # 窗口已经跟着走了，鼠标在窗口里的位置没变
+    assert overlay.collapsed  # 拖动不算点击
+    assert overlay.geometry().bottomLeft() == before.bottomLeft() + QPoint(40, -30)
+    overlay.save_settings()  # 收起着退出：记下的是展开后的位置和大小
+    assert overlay.settings.value("geometry").size() == before.size()
+    overlay.toggle_collapsed()
+    assert overlay.geometry().size() == before.size()
+    assert overlay.geometry().bottomLeft() == before.bottomLeft() + QPoint(40, -30)  # 展开后左下角跟着小条走
 
 
 def test_font_limits_and_click_through(overlay):

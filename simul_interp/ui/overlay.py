@@ -8,6 +8,7 @@
 - 历史可以往回翻：在字幕窗上滚动滚轮（触控板双指滑动），或者拖右边的滑动条。回看的时候，新的句子照常
   加在下面，但眼前这几对不动，而且全部用亮色显示；滚回最底下，或者点顶部的提示，就回到最新；
 - 当前句区域至少能放两行原文和两行译文，只在遇到特别长的句子时才扩大；窗口大小只随手动拖动改变；
+- 不想看的时候可以收起：点右上角的“–”，窗口缩成左下角的一个小条，点小条再展开。收起时照常识别、翻译、记录；
 - 右上角一个小圆点：听到有人说话时变绿；启动时的状态提示是左上角的一行小字，都不占字幕的位置；
 - 始终置顶、不抢焦点；macOS 上还能浮在全屏视频、全屏会议的上面；
 - 拖动移动，右下角调整大小；右键菜单调字号、背景深浅、鼠标穿透；菜单栏图标里可以解锁穿透和退出；
@@ -59,6 +60,8 @@ TEXT_COLORS = ("#dcdcdc", "#ffffff")  # 原文、译文
 HISTORY_OPACITY = (0.76, 0.58)
 LIVE_COLORS = ("#e6e6e6", "#8f8f8f")  # 正在识别的原文：已确认的部分、暂定的部分
 RELAYOUT_NOW = 60  # 历史不超过这么多对时，窗口一变宽窄就全部重新排版；更多时拖动期间只排看得见的
+PILL_SIZE = (176, 30)  # 收起之后那个小条的大小
+CLICK_SLOP = 4  # 按下到松开，鼠标移动不超过这么多像素才算“点击”，否则是拖动
 
 
 class UnitSnapshot(NamedTuple):
@@ -408,6 +411,8 @@ class Overlay(QWidget):
         self.opacity = float(self.settings.value("opacity", cfg.opacity))
         self.scrollback = max(10, cfg.scrollback)
         self.click_through = False
+        self.collapsed = False  # 收起成小条
+        self._expanded = QRect()  # 收起之前窗口的位置和大小
         self.on_reconnect = None  # 由 run_overlay 设置：重新连接音频设备
 
         self.units: OrderedDict[int, UnitSnapshot] = OrderedDict()  # 按编号从小到大
@@ -432,6 +437,8 @@ class Overlay(QWidget):
         self.grip.resize(16, 16)
 
         self._drag_from: QPoint | None = None
+        self._pressed_at: QPoint | None = None  # 鼠标按下的位置（屏幕坐标），用来区分点击和拖动
+        self._pressed_button = False  # 鼠标是不是按在了右上角的“收起”按钮上
         self._thumb_grab: float | None = None  # 正在拖滑动条：按下时鼠标离滑块顶边多远
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.refresh)  # “等太久就往下走”要看时间，所以定时检查；内容没变时什么也不做
@@ -536,8 +543,8 @@ class Overlay(QWidget):
         return cached[3]
 
     def refresh(self) -> None:
-        if not self._dirty and not self._open:
-            return  # 没有东西变，也没有正在等的译文：什么都不用做
+        if self.collapsed or (not self._dirty and not self._open):
+            return  # 收起来了；或者没有东西变、也没有正在等的译文：什么都不用做
         self._dirty = False
         zh = self.font_size
         fr = max(11, round(zh * self.source_ratio))
@@ -553,7 +560,48 @@ class Overlay(QWidget):
         self.captions.set_fonts(fr, zh)
         self.captions.set_content(history_blocks, slot_html)
 
+    # ---- 收起和展开 ----
+
+    def set_collapsed(self, collapsed: bool) -> None:
+        """收起成一个小条（只留“正在听”的圆点），或者展开回原来的样子。收起时识别、翻译、记录照常进行。"""
+        if collapsed == self.collapsed:
+            return
+        if collapsed:
+            self._expanded = self.geometry()
+            self.collapsed = True
+            self.captions.hide()
+            self.grip.hide()
+            pill = QRect(0, 0, *PILL_SIZE)
+            pill.moveBottomLeft(self._expanded.bottomLeft())  # 小条留在原来窗口的左下角
+            self.setGeometry(pill)
+        else:
+            geometry = self._expanded_geometry()
+            self.collapsed = False
+            self.setGeometry(geometry)
+            self.captions.show()
+            self.grip.show()
+            self._dirty = True  # 收起期间来的句子，展开时一次补上
+            self.refresh()
+        self.update()
+
+    def toggle_collapsed(self) -> None:
+        self.set_collapsed(not self.collapsed)
+
+    def _expanded_geometry(self) -> QRect:
+        """展开后窗口该在哪：大小和收起前一样，左下角跟着小条走（小条可能被拖到了别处），并且不超出屏幕。"""
+        rect = QRect(self._expanded)
+        rect.moveBottomLeft(self.geometry().bottomLeft())
+        screen = QGuiApplication.screenAt(self.geometry().center()) or QGuiApplication.primaryScreen()
+        area = screen.availableGeometry()
+        rect.moveLeft(max(area.left(), min(rect.left(), area.right() - rect.width() + 1)))
+        rect.moveTop(max(area.top(), min(rect.top(), area.bottom() - rect.height() + 1)))
+        return rect
+
     # ---- 绘制 ----
+
+    def _collapse_button(self) -> QRect:
+        """右上角“收起”按钮的位置（在小圆点左边）。"""
+        return QRect(self.width() - 50, 3, 24, 16)
 
     def _review_hint(self) -> QRect:
         """回看时顶部那行提示的位置（点它回到最新）。"""
@@ -579,11 +627,28 @@ class Overlay(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
+        font = QFont()
+        font.setPixelSize(12)
+        painter.setFont(font)
+        dot = QColor(92, 214, 128) if self.hearing else QColor(130, 130, 130, 150)  # 听到有人说话时变绿
+        if self.collapsed:  # 小条：背景至少要看得见，圆点照常亮，文字提示怎么展开
+            painter.setBrush(QColor(12, 12, 14, round(255 * max(self.opacity, 0.45))))
+            painter.drawRoundedRect(self.rect(), self.height() / 2, self.height() / 2)
+            painter.setBrush(dot)
+            painter.drawEllipse(QPointF(16, self.height() / 2), 3.5, 3.5)
+            painter.setPen(QColor("#dcdcdc"))
+            painter.drawText(self.rect().adjusted(28, 0, -8, 0), Qt.AlignmentFlag.AlignVCenter, "同传字幕 · 点击展开")
+            return
         painter.setBrush(QColor(12, 12, 14, round(255 * self.opacity)))
         painter.drawRoundedRect(self.rect(), 14, 14)
-        # 右上角的小圆点：听到有人说话时变绿
-        painter.setBrush(QColor(92, 214, 128) if self.hearing else QColor(130, 130, 130, 150))
+        painter.setBrush(dot)
         painter.drawEllipse(QPointF(self.width() - 14, 12), 3.5, 3.5)
+        button = self._collapse_button()  # “收起”按钮：一个小圆角框，里面一道横线
+        painter.setBrush(QColor(255, 255, 255, 60 if self._pressed_button else 26))
+        painter.drawRoundedRect(button, 5, 5)
+        painter.setPen(QColor(255, 255, 255, 190))
+        painter.drawLine(button.center().x() - 5, button.center().y() + 1, button.center().x() + 5, button.center().y() + 1)
+        painter.setPen(Qt.PenStyle.NoPen)
         thumb = self._scroll_thumb()
         if thumb is not None:  # 滑动条：平时很淡，回看或者拖动的时候亮一些
             active = self.captions.reviewing or self._thumb_grab is not None
@@ -591,12 +656,9 @@ class Overlay(QWidget):
             painter.drawRoundedRect(self._scroll_track(), 3, 3)
             painter.setBrush(QColor(255, 255, 255, 150 if active else 70))
             painter.drawRoundedRect(thumb, 3, 3)
-        font = QFont()
-        font.setPixelSize(12)
-        painter.setFont(font)
         if self.status:  # 状态提示：左上角一行小字，不占字幕的位置
             painter.setPen(QColor("#ffd479"))
-            right = self._review_hint().left() - 8 if self.captions.reviewing else self.width() - 40
+            right = self._review_hint().left() - 8 if self.captions.reviewing else self._collapse_button().left() - 8
             painter.drawText(QRect(20, 3, max(0, right - 20), 16), Qt.AlignmentFlag.AlignLeft, self.status)
         if self.captions.reviewing:
             painter.setPen(QColor("#9fd0ff"))
@@ -612,6 +674,8 @@ class Overlay(QWidget):
 
     def wheelEvent(self, event) -> None:
         """滚轮或触控板双指滑动：往回翻历史。"""
+        if self.collapsed:
+            return
         delta = event.pixelDelta().y()  # 触控板给的是像素，跟手
         if not delta:
             delta = event.angleDelta().y() / 120 * self.font_size * 3  # 鼠标滚轮：一格大约三行
@@ -623,8 +687,14 @@ class Overlay(QWidget):
         if event.button() != Qt.MouseButton.LeftButton:
             return
         pos = event.position().toPoint()
-        thumb = self._scroll_thumb()
-        if thumb is not None and self._scroll_track().adjusted(-7, 0, 7, 0).contains(pos):
+        self._pressed_at = event.globalPosition().toPoint()
+        thumb = None if self.collapsed else self._scroll_thumb()
+        if self.collapsed:  # 小条：按住能拖走，原地点一下是展开（松开时判断）
+            self._drag_from = self._pressed_at - self.frameGeometry().topLeft()
+        elif self._collapse_button().adjusted(-3, -3, 3, 3).contains(pos):
+            self._pressed_button = True
+            self.update()
+        elif thumb is not None and self._scroll_track().adjusted(-7, 0, 7, 0).contains(pos):
             if not thumb.adjusted(-7, 0, 7, 0).contains(pos):
                 self._move_thumb(pos.y() - thumb.height() / 2)  # 点在滑块外面的轨道上：滑块直接跳过来
                 thumb = self._scroll_thumb()
@@ -642,10 +712,20 @@ class Overlay(QWidget):
             self.move(event.globalPosition().toPoint() - self._drag_from)
 
     def mouseReleaseEvent(self, event) -> None:
-        self._drag_from = None
+        moved = self._pressed_at is None or (event.globalPosition().toPoint() - self._pressed_at).manhattanLength()
+        clicked = self._pressed_at is not None and moved <= CLICK_SLOP
+        on_button, self._pressed_button = self._pressed_button, False
+        self._drag_from = self._pressed_at = None
         if self._thumb_grab is not None:
             self._thumb_grab = None
             self.update()
+        if self.collapsed and clicked:
+            self.set_collapsed(False)
+        elif on_button:
+            if self._collapse_button().adjusted(-3, -3, 3, 3).contains(event.position().toPoint()):
+                self.set_collapsed(True)
+            else:
+                self.update()
 
     def _move_thumb(self, top: float) -> None:
         """把滑块的顶边放到 top（窗口坐标），历史跟着翻到对应的位置。"""
@@ -659,9 +739,10 @@ class Overlay(QWidget):
         self.build_menu(QMenu(self)).exec(event.globalPos())
 
     def build_menu(self, menu: QMenu) -> QMenu:
-        if self.captions.reviewing:
+        menu.addAction("展开字幕窗" if self.collapsed else "收起字幕窗", self.toggle_collapsed)
+        if self.captions.reviewing and not self.collapsed:
             menu.addAction("回到最新字幕", self.captions.scroll_to_latest)
-            menu.addSeparator()
+        menu.addSeparator()
         menu.addAction("字号放大", lambda: self.change_font(+2))
         menu.addAction("字号缩小", lambda: self.change_font(-2))
         menu.addAction("背景加深", lambda: self.change_opacity(+0.1))
@@ -706,7 +787,8 @@ class Overlay(QWidget):
         self.setGeometry(screen.center().x() - width // 2, screen.bottom() - height - 60, width, height)
 
     def save_settings(self) -> None:
-        self.settings.setValue("geometry", self.geometry())
+        # 收起着退出的话，记下的是展开后的位置和大小：下次启动是展开的
+        self.settings.setValue("geometry", self._expanded_geometry() if self.collapsed else self.geometry())
         self.settings.setValue("font_size", self.font_size)
         self.settings.setValue("opacity", self.opacity)
 
