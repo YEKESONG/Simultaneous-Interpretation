@@ -12,21 +12,16 @@
 - 右上角一个小圆点：听到有人说话时变绿；启动时的状态提示是左上角的一行小字，都不占字幕的位置；
 - 始终置顶、不抢焦点；macOS 上还能浮在全屏视频、全屏会议的上面；
 - 拖动移动，右下角调整大小；右键菜单调字号、背景深浅、鼠标穿透；菜单栏图标里可以解锁穿透和退出；
-- 识别和翻译在后台线程跑，结果通过 Qt 信号交给界面线程。
+- 识别和翻译在后台线程跑，结果通过 Qt 信号交给界面线程（程序的启动和各部分的接线在 ui/app.py）。
 """
 
 from __future__ import annotations
 
 import html
 import logging
-import os
-import signal
 import sys
-import threading
-import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from pathlib import Path
 from typing import NamedTuple
 
 from PySide6.QtCore import (
@@ -41,8 +36,8 @@ from PySide6.QtCore import (
     QVariantAnimation,
     Signal,
 )
-from PySide6.QtGui import QAction, QColor, QFont, QGuiApplication, QIcon, QPainter, QPixmap, QTextDocument
-from PySide6.QtWidgets import QApplication, QGraphicsDropShadowEffect, QMenu, QSizeGrip, QSystemTrayIcon, QWidget
+from PySide6.QtGui import QAction, QColor, QFont, QGuiApplication, QPainter, QPixmap, QTextDocument
+from PySide6.QtWidgets import QApplication, QGraphicsDropShadowEffect, QMenu, QSizeGrip, QWidget
 
 from ..clock import now
 from ..config import UiConfig
@@ -413,7 +408,8 @@ class Overlay(QWidget):
         self.click_through = False
         self.collapsed = False  # 收起成小条
         self._expanded = QRect()  # 收起之前窗口的位置和大小
-        self.on_reconnect = None  # 由 run_overlay 设置：重新连接音频设备
+        self.on_reconnect = None  # 由 ui/app.py 设置：重新连接音频设备
+        self.on_show_panel = None  # 由 ui/app.py 设置：打开控制面板
 
         self.units: OrderedDict[int, UnitSnapshot] = OrderedDict()  # 按编号从小到大
         self._seen_at: dict[int, float] = {}  # 每个单元第一次出现的时刻
@@ -739,6 +735,10 @@ class Overlay(QWidget):
         self.build_menu(QMenu(self)).exec(event.globalPos())
 
     def build_menu(self, menu: QMenu) -> QMenu:
+        if self.on_show_panel is not None:
+            menu.addAction("控制面板（换语言、开始 / 暂停）", self.on_show_panel)
+        if not self.isVisible():
+            menu.addAction("显示字幕窗", self.show)
         menu.addAction("展开字幕窗" if self.collapsed else "收起字幕窗", self.toggle_collapsed)
         if self.captions.reviewing and not self.collapsed:
             menu.addAction("回到最新字幕", self.captions.scroll_to_latest)
@@ -825,6 +825,26 @@ def float_over_fullscreen(widget: QWidget) -> None:
     send(window, "setHidesOnDeactivate:", False, restype=None, argtypes=(ctypes.c_bool,))
 
 
+def activate_app() -> None:
+    """macOS：把本程序切到前台。不在程序坞显示图标的程序（见 make_accessory_app）不会自己到前台来，
+    普通窗口（控制面板）一显示就可能被别的窗口盖住。"""
+    if sys.platform != "darwin" or QGuiApplication.platformName() != "cocoa":
+        return
+    import ctypes
+    import ctypes.util
+
+    objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
+    objc.objc_getClass.restype = ctypes.c_void_p
+    objc.objc_getClass.argtypes = [ctypes.c_char_p]
+    objc.sel_registerName.restype = ctypes.c_void_p
+    objc.sel_registerName.argtypes = [ctypes.c_char_p]
+    address = ctypes.cast(objc.objc_msgSend, ctypes.c_void_p).value
+    get = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(address)
+    activate = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_bool)(address)
+    app = get(objc.objc_getClass(b"NSApplication"), objc.sel_registerName(b"sharedApplication"))
+    activate(app, objc.sel_registerName(b"activateIgnoringOtherApps:"), True)
+
+
 def make_accessory_app() -> None:
     """macOS：不在程序坞显示图标、不抢前台，像一个工具浮层（这样才能浮在别的应用的全屏空间上）。"""
     if sys.platform != "darwin" or QGuiApplication.platformName() != "cocoa":
@@ -860,66 +880,3 @@ def tray_icon_pixmap() -> QPixmap:
     painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "译")
     painter.end()
     return pixmap
-
-
-def run_overlay(cfg, interpreter_factory) -> int:
-    """主线程跑 Qt 界面，后台线程跑同传流水线。interpreter_factory(view) 返回 Interpreter。"""
-    app = QApplication.instance() or QApplication(sys.argv)
-    app.setQuitOnLastWindowClosed(False)
-    make_accessory_app()
-
-    bridge = Bridge()
-    overlay = Overlay(cfg.ui)
-    bridge.live.connect(overlay.set_live)
-    bridge.unit.connect(overlay.set_unit)
-    bridge.status.connect(overlay.set_status)
-    interpreter = interpreter_factory(QtView(bridge))
-    overlay.on_reconnect = interpreter.reconnect_audio
-
-    def work() -> None:
-        try:
-            interpreter.run()
-        except Exception as exc:  # 在字幕窗里显示错误，而不是悄悄退出
-            logger.exception("同传出错")
-            bridge.status.emit(f"出错：{exc}")
-        finally:
-            bridge.finished.emit()
-
-    if cfg.audio.source == "file":  # 用文件模拟时，放完 5 秒后自动退出；内录要用户自己退出
-        bridge.finished.connect(lambda: QTimer.singleShot(5000, app.quit))
-    worker = threading.Thread(target=work, name="interpreter", daemon=True)
-    worker.start()
-
-    # 开发调试：定时把字幕窗截图存下来（默认每 10 秒；SI_OVERLAY_SNAPSHOT_MS 可以改间隔，用来检查闪烁和跳动）
-    snapshot_dir = os.environ.get("SI_OVERLAY_SNAPSHOTS")
-    if snapshot_dir:
-        Path(snapshot_dir).mkdir(parents=True, exist_ok=True)
-        snapshots = QTimer(overlay)
-        snapshots.timeout.connect(
-            lambda: overlay.grab().save(str(Path(snapshot_dir) / f"overlay_{time.time():.2f}.png"))
-        )
-        snapshots.start(int(os.environ.get("SI_OVERLAY_SNAPSHOT_MS", "10000")))
-
-    tray = QSystemTrayIcon(QIcon(tray_icon_pixmap()), app)
-    tray.setToolTip("法中同传")
-    tray_menu = QMenu()
-    overlay.build_menu(tray_menu)
-    tray_menu.aboutToShow.connect(lambda: (tray_menu.clear(), overlay.build_menu(tray_menu)))
-    tray.setContextMenu(tray_menu)
-    tray.show()
-
-    overlay.show()
-    float_over_fullscreen(overlay)
-
-    # Qt 的事件循环在 C++ 里，Python 收不到 Ctrl+C；定时回到 Python 一下，让信号处理有机会执行
-    signal.signal(signal.SIGINT, lambda *_: app.quit())
-    heartbeat = QTimer()
-    heartbeat.timeout.connect(lambda: None)
-    heartbeat.start(200)
-
-    app.exec()
-    overlay.save_settings()
-    tray.hide()
-    interpreter.stop()
-    worker.join(timeout=15)
-    return 0

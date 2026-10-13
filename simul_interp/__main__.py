@@ -135,9 +135,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         start_paused=args.paused or not cfg.ui.autostart,
     )
     if cfg.ui.mode == "overlay":
-        from .ui.overlay import run_overlay
+        from .ui.app import run_app
 
-        return run_overlay(cfg, lambda view: Interpreter(cfg, view, **options))
+        return run_app(cfg, lambda view: Interpreter(cfg, view, **options))
     if cfg.ui.mode == "console":
         from .ui.console import ConsoleView
 
@@ -169,6 +169,9 @@ def cmd_bench_translate(args: argparse.Namespace) -> int:
     return bench_translate(get_config(args), args.sentences)
 
 
+COMMANDS = {"run", "config", "record", "vad", "bench-asr", "bench-pipeline", "bench-translate"}
+
+
 def add_source_args(p: argparse.ArgumentParser, default_speed: float | None = None) -> None:
     p.add_argument("--file", type=Path, default=None, help="用音频文件代替内录（任何 ffmpeg 支持的格式）")
     p.add_argument("--speed", type=float, default=default_speed, help="文件播放倍速：1 = 实时，0 = 尽快")
@@ -184,9 +187,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p = sub.add_parser("run", help="开始同传（默认内录系统声音）")
+    p = sub.add_parser("run", help="开始同传（默认内录系统声音）；不写子命令时就是它")
     add_source_args(p)
-    p.add_argument("--ui", choices=["overlay", "console"], default=None, help="界面：透明悬浮窗或终端，默认看配置")
+    p.add_argument("--ui", choices=["overlay", "console"], default=None, help="界面：控制面板 + 透明字幕窗，或只用终端；默认看配置")
     p.add_argument("--no-translate", action="store_true", help="只识别不翻译")
     p.add_argument("--mock-translate", action="store_true", help="用模拟翻译（不联网），测试流程和界面")
     p.add_argument("--no-transcript", action="store_true", help="不保存会话记录")
@@ -223,11 +226,18 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def with_default_command(argv: list[str]) -> list[str]:
+    """不写子命令就是启动同传：双击启动脚本、直接 python -m simul_interp 都走这里。"""
+    if COMMANDS.intersection(argv) or {"-h", "--help", "--version"}.intersection(argv):
+        return list(argv)
+    return [*argv, "run"]
+
+
 def main(argv: list[str] | None = None) -> int:
     if sys.platform == "win32":  # Windows 控制台被重定向时编码可能不是 UTF-8，打印中文会报错
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-    args = build_parser().parse_args(argv)
+    args = build_parser().parse_args(with_default_command(sys.argv[1:] if argv is None else argv))
     setup_logging(args.verbose)
     return args.func(args)
 

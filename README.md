@@ -3,11 +3,14 @@
 [![tests](https://github.com/YEKESONG/Simultaneous-Interpretation/actions/workflows/tests.yml/badge.svg)](https://github.com/YEKESONG/Simultaneous-Interpretation/actions/workflows/tests.yml)
 
 内录电脑正在播放的声音（视频会议、视频网站），实时识别法语并翻译成中文，在一个透明悬浮窗里成对显示原文和译文。
+带一个控制面板：随时开始 / 暂停监听，也可以换成别的语言（英、西、德、意、葡语 → 任意目标语言）。
 内录不会影响你听原声：戴耳机或者用扬声器都照常能听到。每次会话的原文、译文和一份录音都会保存下来，方便事后校对。
 
 > 当前状态：开发中。每个阶段的进度见下方清单，详细过程见 [docs/DEVLOG.md](docs/DEVLOG.md)。
 
 ![悬浮字幕窗效果（示例文字）](docs/overlay_preview.png)
+
+![控制面板](docs/panel_preview.png)
 
 ## 工作原理
 
@@ -48,6 +51,7 @@
 - [x] S17 字幕窗可以往回翻看：滚轮或右侧的滑动条，回看时眼前的内容不动
 - [x] S18 字幕窗可以收起成一个小条，点一下再展开
 - [x] S19 流水线支持暂停 / 继续，以及运行中换语言（法、英、西、德、意、葡 → 任意目标语言）
+- [x] S20 应用前端：控制面板（换语言、开始 / 暂停监听、管理字幕窗），双击就能启动
 
 ## 开发环境
 
@@ -92,8 +96,12 @@ python -m venv .venv
 
 ## 使用
 
+最简单的方式：在访达里双击 `启动同传.command`（Windows 双击 `启动同传.bat`），会出现控制面板和字幕窗。命令行：
+
 ```bash
-.venv/bin/python -m simul_interp run                               # 内录系统声音，透明悬浮字幕窗
+.venv/bin/python -m simul_interp                                   # 同下一行：不写子命令就是 run
+.venv/bin/python -m simul_interp run                               # 内录系统声音，控制面板 + 透明悬浮字幕窗
+.venv/bin/python -m simul_interp run --paused                      # 启动后先不监听，等在控制面板上点“开始监听”
 .venv/bin/python -m simul_interp run --ui console                  # 内录系统声音，终端显示
 .venv/bin/python -m simul_interp run --ui console --file 录音.m4a  # 用音频文件模拟
 .venv/bin/python -m simul_interp run --ui console --mock-translate # 不联网的模拟翻译，测试用
@@ -110,6 +118,12 @@ python -m venv .venv
 - 只录“电脑有声音输出”的时间段：没有任何程序在播放声音时，系统不送音频数据，这段空档不会录进去；
 - 不想录：在配置里设 `[recording] enabled = false`，或者只这一次加 `--no-recording`；
 - 录下别人的发言之前，请先征得对方同意。
+
+控制面板：
+- 上面两个下拉框选语言：左边是说话人说的语言（法、英、西、德、意、葡语），右边是译成的语言。运行中随时可以换，从下一句话开始生效，不用重启，会话记录里会留一行说明。在这里选的只管这一次；想改每次启动的默认值，改 `config.toml` 的 `[asr] language` 和 `[translate] target_language`；
+- 大按钮开始 / 暂停监听。暂停时不识别、不翻译，录音也跟着停（所以记录里的时间仍然对得上录音）；继续后记录里留一行“暂停后从这里继续”。想启动后先不监听：加 `--paused`，或者在配置里设 `[ui] autostart = false`；
+- “显示字幕窗”和“收起 / 展开字幕窗”管字幕窗；最下面能看到这次的录音和记录的文件名，一键打开它们所在的文件夹；
+- 点面板窗口的关闭按钮只是把面板藏起来，同传照常进行。要找回它：右键字幕窗，或者点菜单栏的“译”字图标，选“控制面板”。要结束程序，点面板上的“退出”。
 
 悬浮字幕窗的操作：
 - 底部是当前句区域（白色是已确认的原文，灰色是暂定的，下面留白等译文），上方是翻好的历史，越旧越暗；

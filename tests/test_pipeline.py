@@ -75,11 +75,13 @@ class LevelBackend:
 
     def __init__(self, words=WORDS):
         self.words = words
+        self.prompts = []  # 每次识别拿到的上文提示
 
     def load(self):
         pass
 
     def transcribe(self, audio, prompt="", word_timestamps=False, max_tokens=None):
+        self.prompts.append(prompt)
         levels = np.rint(np.asarray(audio) * 100).astype(int)
         if len(levels) == 0:
             return []
@@ -209,10 +211,13 @@ def test_unfinished_sentence_is_joined_with_its_continuation(session):
 
 def test_pause_ignores_what_is_said_and_resume_picks_up_again(session):
     source = ManualSource()
-    interpreter, view = session(source=source)
-    worker = threading.Thread(target=interpreter.run)
+    # 两句话，分别在第 1~2 秒和第 3.5~5.3 秒。第二句长一些：一段话超过 1.5 秒，识别时才会带上文提示
+    words = "Bonjour à tous. Merci beaucoup à vous tous.".split()
+    times = [*TIMES[:3], (3.5, 3.8), (3.86, 4.16), (4.22, 4.52), (4.58, 4.88), (4.94, 5.3)]
+    interpreter, view = session(words=words, source=source)
+    worker = threading.Thread(target=interpreter.run, daemon=True)  # daemon：中途有断言失败时不会把测试进程挂住
     worker.start()
-    audio = make_audio()  # 两句话，分别在第 1~2 秒和第 3.5~4.3 秒
+    audio = make_audio(times)
     first, second = audio[: 3 * SAMPLE_RATE], audio[3 * SAMPLE_RATE :]
     assert wait_for(lambda: interpreter.state == "listening")
     source._feed(first)
@@ -221,20 +226,24 @@ def test_pause_ignores_what_is_said_and_resume_picks_up_again(session):
     interpreter.pause()
     assert interpreter.state == "paused" and view.status[-1] == "已暂停"
     position = source.position
-    source._feed(second)  # 暂停期间说的 “Merci beaucoup.”：不识别，也不录
+    source._feed(second)  # 暂停期间说的第二句：不识别，也不录
     time.sleep(0.2)
     assert len(view.units) == 1 and source.position == position
 
     interpreter.resume()
     assert interpreter.state == "listening" and view.status[-1] == ""
+    asked = len(interpreter.backend.prompts)
     source._feed(second)  # 继续之后再说一遍：照常出来
     assert wait_for(lambda: 1 in view.units)
+    # 暂停前后的声音接不上：暂停前的句子不再当上文（否则模型容易照着上文“复述”，而不是听写）
+    assert len(interpreter.backend.prompts) > asked
+    assert not any("Bonjour" in prompt for prompt in interpreter.backend.prompts[asked:])
     source._finish()
     worker.join(5)
-    assert [view.units[i].source for i in sorted(view.units)] == ["Bonjour à tous.", "Merci beaucoup."]
+    assert [view.units[i].source for i in sorted(view.units)] == ["Bonjour à tous.", "Merci beaucoup à vous tous."]
     assert interpreter.state == "ended"
     text = interpreter.transcript.path.read_text(encoding="utf-8")
-    assert text.index("Bonjour à tous.") < text.index("暂停后从这里继续") < text.index("Merci beaucoup.")
+    assert text.index("Bonjour à tous.") < text.index("暂停后从这里继续") < text.index("Merci beaucoup à vous tous.")
     # 录音里没有暂停的那一段，所以记录里的时间仍然对得上录音
     assert len(read_wav(interpreter.recorder.path)) == round(source.position * SAMPLE_RATE)
 

@@ -22,7 +22,7 @@ from .types import AsrBackend, AsrUpdate
 
 logger = logging.getLogger(__name__)
 
-_RESET = object()  # 放进事件队列的记号：换了识别语言，之前攒下的上文提示作废
+_RESET = object()  # 放进事件队列的记号：之前攒下的上文提示作废（换了识别语言，或者暂停过）
 
 
 class AsrRunner:
@@ -51,7 +51,13 @@ class AsrRunner:
             change(language)
         else:
             self.backend.language = language
-        self._events.put(_RESET)  # 上文提示是用旧语言写的，交给识别线程去清掉
+        self.reset_context()  # 上文提示是用旧语言写的
+
+    def reset_context(self) -> None:
+        """清掉给模型当提示用的上文（可以在任何线程调用，由识别线程去清）。
+
+        换语言、暂停之后要清：上文和接下来的声音对不上时，模型容易照着上文“复述”，而不是听写。"""
+        self._events.put(_RESET)
 
     def run(self, source: AudioSource, on_started: Callable[[], None] | None = None) -> None:
         """阻塞运行，直到音频源结束或调用了 stop()。模型加载好、开始收听时调用 on_started。"""

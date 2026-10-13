@@ -171,6 +171,7 @@ class Interpreter:
             return
         if self.source.position > 0:  # 录音里没有暂停的那段时间，在记录里留个记号
             self._note("暂停后从这里继续")
+        self.asr.reset_context()  # 暂停前后的声音接不上，之前的句子不能再给识别当上文
         self.source.resume()
         self.state = "listening"
         self.view.on_status("")
