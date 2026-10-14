@@ -54,6 +54,8 @@ class WindowsLoopbackSource(AudioSource):
         self._resampler = None
         self._gaps = GapFiller()
         self._feed_lock = threading.Lock()
+        # 打开、关闭录音流用另一把锁：关流要等正在执行的回调结束，回调要拿 _feed_lock，用同一把会互相等
+        self._device_lock = threading.Lock()
         self._stop = threading.Event()
         self._filler: threading.Thread | None = None
 
@@ -64,15 +66,22 @@ class WindowsLoopbackSource(AudioSource):
         self._filler.start()
 
     def stop(self) -> None:
-        self._stop.set()
+        # 退出时主线程（Pipeline.stop）和识别线程（收尾的 finally）几乎同时调用这里。
+        # 同一个 PortAudio 流关两次会损坏内存，程序在退出时崩溃，所以只让第一次真正去关
+        with self._device_lock:
+            if self._stop.is_set():
+                return
+            self._stop.set()
+            self._close()
         if self._filler:
             self._filler.join(timeout=1.0)
-        self._close()
         self._finish()
 
     def reconnect(self) -> None:
         """切换输出设备后调用：重新找默认扬声器对应的 loopback 设备。"""
-        with self._feed_lock:
+        with self._device_lock:
+            if self._stop.is_set():  # 已经停了，不要再打开
+                return
             self._close()
             self._open()
 

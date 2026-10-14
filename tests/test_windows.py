@@ -1,13 +1,15 @@
 """Windows 专用部分的逻辑测试。在任何系统上都能跑：不需要 PyAudioWPatch，也不需要真的 faster-whisper。"""
 
 import sys
+import threading
+import time
 import types
 
 import numpy as np
 import pytest
 
 from simul_interp.asr.faster_whisper_backend import FasterWhisperBackend
-from simul_interp.audio.windows_loopback import GapFiller
+from simul_interp.audio.windows_loopback import GapFiller, WindowsLoopbackSource
 
 
 def test_gap_filler_adds_silence_only_after_long_gaps():
@@ -20,6 +22,22 @@ def test_gap_filler_adds_silence_only_after_long_gaps():
     assert abs(gaps.missing_samples(10.45) - 2400) <= 1
     gaps.mark(10.5)  # 又有声音了
     assert gaps.missing_samples(10.55) == 0
+
+
+def test_loopback_stop_closes_stream_only_once():
+    """退出时主线程和识别线程会同时调用 stop()；同一个 PortAudio 流关两次会让程序崩溃（S29）。"""
+    src = WindowsLoopbackSource()
+    closed = []
+    src._close = lambda: (time.sleep(0.05), closed.append(1))  # 拉长关流的时间，让两个线程撞上
+    src._open = lambda: pytest.fail("停止以后不应该再打开")
+    threads = [threading.Thread(target=src.stop) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert closed == [1]
+    src.reconnect()  # 停止以后再点“重新连接”：什么都不做
+    assert list(src.chunks()) == []  # 音频流正常结束
 
 
 class FakeWord:
