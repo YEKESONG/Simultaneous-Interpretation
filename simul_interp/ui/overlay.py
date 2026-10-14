@@ -26,10 +26,12 @@ from typing import NamedTuple
 
 from PySide6.QtCore import (
     QEasingCurve,
+    QEvent,
     QObject,
     QPoint,
     QPointF,
     QRect,
+    QRectF,
     QSettings,
     Qt,
     QTimer,
@@ -37,7 +39,7 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtGui import QAction, QColor, QFont, QGuiApplication, QPainter, QPixmap, QTextDocument
-from PySide6.QtWidgets import QApplication, QGraphicsDropShadowEffect, QMenu, QSizeGrip, QWidget
+from PySide6.QtWidgets import QApplication, QGraphicsDropShadowEffect, QMenu, QWidget
 
 from ..clock import now
 from ..config import UiConfig
@@ -58,6 +60,24 @@ LIVE_COLORS = ("#e6e6e6", "#8f8f8f")  # 正在识别的原文：已确认的部�
 RELAYOUT_NOW = 60  # 历史不超过这么多对时，窗口一变宽窄就全部重新排版；更多时拖动期间只排看得见的
 PILL_SIZE = (176, 30)  # 收起之后那个小条的大小
 CLICK_SLOP = 4  # 按下到松开，鼠标移动不超过这么多像素才算“点击”，否则是拖动
+EDGE = 6  # 离窗口边缘这么近按住鼠标拖，是拉这条边改大小
+CORNER = 16  # 离角这么近（又贴着边）就是拉角；右下角这么大的一块整个都算，那里画着拉手
+MIN_WIDTH = 320  # 窗口最窄多少；最矮由字号决定：至少放得下当前句区域
+FONT_RANGE = (14, 64)  # 译文字号的范围（像素）
+FONT_STEP = 2
+PINCH_STEP = 0.08  # 触控板双指捏合：放大或缩小攒够 8% 才改一档字号，手一抖不会变
+NOTE_MS = 1200  # 改字号后左上角显示“字号 24”的时间
+# 鼠标停在哪条边或哪个角上，就显示哪种调整大小的光标
+EDGE_CURSORS = {
+    frozenset({"left"}): Qt.CursorShape.SizeHorCursor,
+    frozenset({"right"}): Qt.CursorShape.SizeHorCursor,
+    frozenset({"top"}): Qt.CursorShape.SizeVerCursor,
+    frozenset({"bottom"}): Qt.CursorShape.SizeVerCursor,
+    frozenset({"top", "left"}): Qt.CursorShape.SizeFDiagCursor,
+    frozenset({"bottom", "right"}): Qt.CursorShape.SizeFDiagCursor,
+    frozenset({"top", "right"}): Qt.CursorShape.SizeBDiagCursor,
+    frozenset({"bottom", "left"}): Qt.CursorShape.SizeBDiagCursor,
+}
 
 
 class UnitSnapshot(NamedTuple):
@@ -443,16 +463,24 @@ class Overlay(QWidget):
         shadow.setColor(QColor(0, 0, 0, 230))
         self.captions.setGraphicsEffect(shadow)
         self.captions.scrolled.connect(self.update)  # 滑动条画在这个窗口上
-        self.grip = QSizeGrip(self)
-        self.grip.resize(16, 16)
+        self.setMouseTracking(True)  # 不按键时也收到鼠标移动：停在边上要换成调整大小的光标
 
+        self._hover = False  # 鼠标在窗口上：显示边框、调字号的按钮和右下角的拉手
         self._drag_from: QPoint | None = None
+        self._resize_edges: frozenset[str] = frozenset()  # 正在拉哪几条边改大小
+        self._resize_from = QRect()  # 开始拉的时候窗口的位置和大小
+        self._pressed_font = 0  # 鼠标按在了调字号的按钮上：-1 缩小，+1 放大
+        self._zoom_wheel = 0.0  # ⌘ / Ctrl + 滚轮攒下的量
+        self._pinch = 0.0  # 双指捏合攒下的量
+        self._note_text = ""
+        self._note_until = 0.0
         self._pressed_at: QPoint | None = None  # 鼠标按下的位置（屏幕坐标），用来区分点击和拖动
         self._pressed_button = False  # 鼠标是不是按在了右上角的“收起”按钮上
         self._thumb_grab: float | None = None  # 正在拖滑动条：按下时鼠标离滑块顶边多远
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.refresh)  # “等太久就往下走”要看时间，所以定时检查；内容没变时什么也不做
         self._timer.start(50)
+        self._apply_minimum_size()
         self._restore_geometry()
 
     # ---- 数据更新（主线程） ----
@@ -582,16 +610,17 @@ class Overlay(QWidget):
             self._expanded = self.geometry()
             self.collapsed = True
             self.captions.hide()
-            self.grip.hide()
+            self.setMinimumSize(0, 0)  # 小条比展开时的最小尺寸还小
+            self.unsetCursor()
             pill = QRect(0, 0, *PILL_SIZE)
             pill.moveBottomLeft(self._expanded.bottomLeft())  # 小条留在原来窗口的左下角
             self.setGeometry(pill)
         else:
             geometry = self._expanded_geometry()
             self.collapsed = False
+            self._apply_minimum_size()
             self.setGeometry(geometry)
             self.captions.show()
-            self.grip.show()
             self._dirty = True  # 收起期间来的句子，展开时一次补上
             self.refresh()
         self.update()
@@ -614,6 +643,29 @@ class Overlay(QWidget):
     def _collapse_button(self) -> QRect:
         """右上角“收起”按钮的位置（在小圆点左边）。"""
         return QRect(self.width() - 50, 3, 24, 16)
+
+    def _font_buttons(self) -> tuple[QRect, QRect]:
+        """调字号的两个按钮（“收起”按钮左边）：(缩小, 放大)。鼠标移到窗口上才显示，但随时都能点。"""
+        bigger = QRect(self._collapse_button().left() - 32, 3, 26, 16)
+        return QRect(bigger.left() - 30, 3, 26, 16), bigger
+
+    def _edges_at(self, pos: QPoint) -> frozenset[str]:
+        """鼠标在哪几条边上（拉它们改大小）；不在边上返回空集合。"""
+        if self.collapsed:
+            return frozenset()
+        x, y, w, h = pos.x(), pos.y(), self.width(), self.height()
+        if x >= w - CORNER and y >= h - CORNER:
+            return frozenset({"bottom", "right"})  # 右下角：画着拉手的那一块
+        edges = set()
+        if x < EDGE or (x < CORNER and (y < EDGE or y >= h - EDGE)):
+            edges.add("left")
+        if x >= w - EDGE or (x >= w - CORNER and (y < EDGE or y >= h - EDGE)):
+            edges.add("right")
+        if y < EDGE or (y < CORNER and (x < EDGE or x >= w - EDGE)):
+            edges.add("top")
+        if y >= h - EDGE or (y >= h - CORNER and (x < EDGE or x >= w - EDGE)):
+            edges.add("bottom")
+        return frozenset(edges)
 
     def _review_hint(self) -> QRect:
         """回看时顶部那行提示的位置（点它回到最新）。"""
@@ -653,6 +705,15 @@ class Overlay(QWidget):
             return
         painter.setBrush(QColor(12, 12, 14, round(255 * self.opacity)))
         painter.drawRoundedRect(self.rect(), 14, 14)
+        if self._hover:  # 鼠标在窗口上：描出窗口的边（背景很透明时也知道该拉哪里），右下角画拉手
+            painter.setPen(QColor(255, 255, 255, 70))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 14, 14)
+            painter.setPen(QColor(255, 255, 255, 120))
+            w, h = self.width(), self.height()
+            for gap in (5, 9, 13):
+                painter.drawLine(w - gap, h - 4, w - 4, h - gap)
+            painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(dot)
         painter.drawEllipse(QPointF(self.width() - 14, 12), 3.5, 3.5)
         button = self._collapse_button()  # “收起”按钮：一个小圆角框，里面一道横线
@@ -660,6 +721,13 @@ class Overlay(QWidget):
         painter.drawRoundedRect(button, 5, 5)
         painter.setPen(QColor(255, 255, 255, 190))
         painter.drawLine(button.center().x() - 5, button.center().y() + 1, button.center().x() + 5, button.center().y() + 1)
+        if self._hover or self._pressed_font:  # 调字号的按钮：A− 缩小，A+ 放大
+            for rect, label, sign in zip(self._font_buttons(), ("A−", "A+"), (-1, 1)):
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(255, 255, 255, 60 if self._pressed_font == sign else 26))
+                painter.drawRoundedRect(rect, 5, 5)
+                painter.setPen(QColor(255, 255, 255, 200))
+                painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
         painter.setPen(Qt.PenStyle.NoPen)
         thumb = self._scroll_thumb()
         if thumb is not None:  # 滑动条：平时很淡，回看或者拖动的时候亮一些
@@ -668,10 +736,16 @@ class Overlay(QWidget):
             painter.drawRoundedRect(self._scroll_track(), 3, 3)
             painter.setBrush(QColor(255, 255, 255, 150 if active else 70))
             painter.drawRoundedRect(thumb, 3, 3)
-        if self.status:  # 状态提示：左上角一行小字，不占字幕的位置
-            painter.setPen(QColor("#ffd479"))
-            right = self._review_hint().left() - 8 if self.captions.reviewing else self._collapse_button().left() - 8
-            painter.drawText(QRect(20, 3, max(0, right - 20), 16), Qt.AlignmentFlag.AlignLeft, self.status)
+        note = self._note_text if now() < self._note_until else ""
+        if note or self.status:  # 状态提示：左上角一行小字，不占字幕的位置；刚改过字号时先显示字号
+            painter.setPen(QColor("#9fd0ff" if note else "#ffd479"))
+            if self.captions.reviewing:
+                right = self._review_hint().left()
+            elif self._hover:
+                right = self._font_buttons()[0].left()
+            else:
+                right = self._collapse_button().left()
+            painter.drawText(QRect(20, 3, max(0, right - 28), 16), Qt.AlignmentFlag.AlignLeft, note or self.status)
         if self.captions.reviewing:
             painter.setPen(QColor("#9fd0ff"))
             painter.drawText(self._review_hint(), Qt.AlignmentFlag.AlignCenter, "正在回看 · 点这里回到最新 ↓")
@@ -679,14 +753,21 @@ class Overlay(QWidget):
     def resizeEvent(self, event) -> None:
         # 手动摆放字幕区，不用布局管理器：布局会根据内容改窗口的最小尺寸，文字一多窗口就被撑大
         self.captions.setGeometry(20, 20, max(1, self.width() - 40), max(1, self.height() - 34))
-        self.grip.move(self.width() - self.grip.width() - 4, self.height() - self.grip.height() - 4)
         super().resizeEvent(event)
 
     # ---- 鼠标：拖动、回看、右键菜单 ----
 
     def wheelEvent(self, event) -> None:
-        """滚轮或触控板双指滑动：往回翻历史。"""
+        """滚轮或触控板双指滑动：往回翻历史。按住 ⌘（Windows 上是 Ctrl）滚动：调字号。"""
         if self.collapsed:
+            return
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:  # macOS 上 Qt 把 ⌘ 当成 Control
+            self._zoom_wheel += event.angleDelta().y()
+            steps = int(self._zoom_wheel / 120)  # 鼠标滚轮一格是 120；触控板一点一点给，攒够一格再变
+            if steps:
+                self._zoom_wheel -= steps * 120
+                self.change_font(FONT_STEP * steps)
+            event.accept()
             return
         delta = event.pixelDelta().y()  # 触控板给的是像素，跟手
         if not delta:
@@ -694,6 +775,44 @@ class Overlay(QWidget):
         if delta:
             self.captions.scroll_by(delta)
         event.accept()
+
+    def event(self, event) -> bool:
+        if (
+            event.type() == QEvent.Type.NativeGesture
+            and event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture
+            and not self.collapsed
+        ):
+            self.zoom_by(event.value())  # 触控板双指捏合
+            return True
+        return super().event(event)
+
+    def zoom_by(self, amount: float) -> None:
+        """双指捏合：amount 是这一下放大了多少（0.05 = 5%，缩小是负数）。攒够一档再改字号。"""
+        self._pinch += amount
+        steps = int(self._pinch / PINCH_STEP)
+        if steps:
+            self._pinch -= steps * PINCH_STEP
+            self.change_font(FONT_STEP * steps)
+
+    def enterEvent(self, event) -> None:
+        self._hover = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._hover = False
+        if not self._resize_edges:
+            self.unsetCursor()
+        self.update()
+        super().leaveEvent(event)
+
+    def _font_button_at(self, pos: QPoint) -> int:
+        smaller, bigger = self._font_buttons()
+        if smaller.adjusted(-2, -3, 2, 3).contains(pos):
+            return -1
+        if bigger.adjusted(-2, -3, 2, 3).contains(pos):
+            return 1
+        return 0
 
     def mousePressEvent(self, event) -> None:
         if event.button() != Qt.MouseButton.LeftButton:
@@ -706,6 +825,12 @@ class Overlay(QWidget):
         elif self._collapse_button().adjusted(-3, -3, 3, 3).contains(pos):
             self._pressed_button = True
             self.update()
+        elif self._font_button_at(pos):
+            self._pressed_font = self._font_button_at(pos)
+            self.update()
+        elif self._edges_at(pos):  # 按在边上或角上：拉它改大小
+            self._resize_edges = self._edges_at(pos)
+            self._resize_from = self.geometry()
         elif thumb is not None and self._scroll_track().adjusted(-7, 0, 7, 0).contains(pos):
             if not thumb.adjusted(-7, 0, 7, 0).contains(pos):
                 self._move_thumb(pos.y() - thumb.height() / 2)  # 点在滑块外面的轨道上：滑块直接跳过来
@@ -718,16 +843,46 @@ class Overlay(QWidget):
             self._drag_from = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
 
     def mouseMoveEvent(self, event) -> None:
-        if self._thumb_grab is not None:
+        if self._resize_edges and self._pressed_at is not None:
+            self._resize_to(event.globalPosition().toPoint() - self._pressed_at)
+        elif self._thumb_grab is not None:
             self._move_thumb(event.position().y() - self._thumb_grab)
         elif self._drag_from is not None:
             self.move(event.globalPosition().toPoint() - self._drag_from)
+        elif not event.buttons():  # 只是移过去：停在边上换成调整大小的光标
+            shape = EDGE_CURSORS.get(self._edges_at(event.position().toPoint()))
+            if shape is None:
+                self.unsetCursor()
+            else:
+                self.setCursor(shape)
+
+    def _resize_to(self, moved: QPoint) -> None:
+        """拉着边改大小：被拉的边跟着鼠标走，对面的边不动，不小于最小尺寸。"""
+        rect = QRect(self._resize_from)
+        min_w, min_h = self.minimumWidth(), self.minimumHeight()
+        if "left" in self._resize_edges:
+            rect.setLeft(min(rect.left() + moved.x(), rect.right() - min_w + 1))
+        if "right" in self._resize_edges:
+            rect.setRight(max(rect.right() + moved.x(), rect.left() + min_w - 1))
+        if "top" in self._resize_edges:
+            rect.setTop(min(rect.top() + moved.y(), rect.bottom() - min_h + 1))
+        if "bottom" in self._resize_edges:
+            rect.setBottom(max(rect.bottom() + moved.y(), rect.top() + min_h - 1))
+        self.setGeometry(rect)
 
     def mouseReleaseEvent(self, event) -> None:
         moved = self._pressed_at is None or (event.globalPosition().toPoint() - self._pressed_at).manhattanLength()
         clicked = self._pressed_at is not None and moved <= CLICK_SLOP
         on_button, self._pressed_button = self._pressed_button, False
+        font_button, self._pressed_font = self._pressed_font, 0
         self._drag_from = self._pressed_at = None
+        if self._resize_edges:
+            self._resize_edges = frozenset()
+            self.settings.setValue("geometry", self.geometry())  # 马上记下：程序被强制退出也不丢
+        if font_button:
+            if self._font_button_at(event.position().toPoint()) == font_button:
+                self.change_font(FONT_STEP * font_button)
+            self.update()
         if self._thumb_grab is not None:
             self._thumb_grab = None
             self.update()
@@ -777,8 +932,31 @@ class Overlay(QWidget):
         return menu
 
     def change_font(self, delta: int) -> None:
-        self.font_size = max(14, min(64, self.font_size + delta))
+        size = max(FONT_RANGE[0], min(FONT_RANGE[1], self.font_size + delta))
+        self._show_note(f"字号 {size}" + ("（最大了）" if size == FONT_RANGE[1] else "（最小了）" if size == FONT_RANGE[0] else ""))
+        if size == self.font_size:
+            return
+        self.font_size = size
         self._dirty = True
+        self._apply_minimum_size()  # 字大了，当前句区域也要更高：窗口太矮的话跟着变高
+        self.settings.setValue("font_size", size)
+
+    def _show_note(self, text: str) -> None:
+        """左上角短暂显示一句提示（比如改字号后的“字号 24”）。"""
+        self._note_text, self._note_until = text, now() + NOTE_MS / 1000
+        self.update()
+        QTimer.singleShot(NOTE_MS + 50, self.update)
+
+    def minimum_height(self) -> int:
+        """展开时窗口最矮多少：上下边距，加上能放两行原文、两行译文的当前句区域。"""
+        zh = self.font_size
+        fr = max(11, round(zh * self.source_ratio))
+        slot = self.captions._text_height(fr, 2) + self.captions._text_height(zh, 2)
+        return int(slot) + 34 + 8
+
+    def _apply_minimum_size(self) -> None:
+        if not self.collapsed:
+            self.setMinimumSize(MIN_WIDTH, self.minimum_height())
 
     def change_opacity(self, delta: float) -> None:
         self.opacity = round(max(0.0, min(0.95, self.opacity + delta)), 2)

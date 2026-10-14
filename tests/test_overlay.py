@@ -5,14 +5,15 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest  # noqa: E402
-from PySide6.QtCore import QAbstractAnimation, QPoint, QPointF, QSettings, Qt  # noqa: E402
-from PySide6.QtGui import QWheelEvent  # noqa: E402
+from PySide6.QtCore import QAbstractAnimation, QEvent, QPoint, QPointF, QRect, QSettings, Qt  # noqa: E402
+from PySide6.QtGui import QEnterEvent, QWheelEvent  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from simul_interp.config import UiConfig  # noqa: E402
 from simul_interp.ui.overlay import (  # noqa: E402
     DRAFT_COLOR,
+    MIN_WIDTH,
     PILL_SIZE,
     STREAM_FALLBACK_S,
     WAIT_FALLBACK_S,
@@ -333,3 +334,116 @@ def test_old_font_setting_is_reset_once(tmp_path):
     assert Overlay(UiConfig(font_size=22), settings=settings).font_size == 22
     settings.setValue("font_size", 30)  # 新版本里用户自己调的字号要保留
     assert Overlay(UiConfig(font_size=22), settings=settings).font_size == 30
+
+
+# ---- 拖边改大小、在字幕窗上调字号 ----
+
+
+def drag(overlay, start, offset, modifiers=Qt.KeyboardModifier.NoModifier):
+    """在窗口里的 start 处按下左键，拖动 offset，再松开（松开时鼠标相对窗口的位置按拖完之后算）。"""
+    QTest.mousePress(overlay, Qt.MouseButton.LeftButton, modifiers, start)
+    QTest.mouseMove(overlay, start + offset)
+    QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, modifiers, start + offset)
+
+
+def hover(overlay, pos):
+    QApplication.sendEvent(overlay, QEnterEvent(QPointF(pos), QPointF(pos), QPointF(overlay.mapToGlobal(pos))))
+    QTest.mouseMove(overlay, pos)
+
+
+def test_any_edge_or_corner_can_be_dragged_to_resize(overlay):
+    overlay.setGeometry(100, 300, 700, 260)
+    QApplication.processEvents()
+    drag(overlay, QPoint(698, 130), QPoint(150, 0))  # 右边往外拉：变宽，左边不动
+    assert overlay.geometry() == QRect(100, 300, 850, 260)
+    drag(overlay, QPoint(2, 258), QPoint(-50, 40))  # 左下角：左边往左、下边往下，右边和上边不动
+    assert overlay.geometry() == QRect(50, 300, 900, 300)
+    drag(overlay, QPoint(400, 1), QPoint(0, -60))  # 上边往上拉：变高，下边不动
+    assert overlay.geometry() == QRect(50, 240, 900, 360)
+    drag(overlay, QPoint(895, 355), QPoint(-100, -100))  # 右下角画着拉手的那一块
+    assert overlay.geometry() == QRect(50, 240, 800, 260)
+    assert overlay.settings.value("geometry") == overlay.geometry()  # 拉完马上记下
+
+
+def test_window_never_gets_smaller_than_the_current_sentence_area(overlay):
+    overlay.setGeometry(100, 300, 700, 260)
+    QApplication.processEvents()
+    drag(overlay, QPoint(698, 130), QPoint(-2000, 0))
+    assert overlay.width() == MIN_WIDTH and overlay.x() == 100  # 拉过头了：停在最窄，左边不动
+    drag(overlay, QPoint(300, 1), QPoint(0, 2000))
+    assert overlay.height() == overlay.minimum_height() and overlay.geometry().bottom() == 300 + 260 - 1
+    small = overlay.height()
+    for _ in range(10):
+        overlay.change_font(+2)  # 字大了，两行原文、两行译文要更高的地方：窗口跟着变高
+    assert overlay.minimum_height() > small and overlay.height() >= overlay.minimum_height()
+
+
+def test_hovering_shows_where_to_resize(overlay):
+    overlay.setGeometry(100, 300, 700, 260)
+    QApplication.processEvents()
+    hover(overlay, QPoint(698, 130))
+    assert overlay.cursor().shape() == Qt.CursorShape.SizeHorCursor
+    hover(overlay, QPoint(3, 3))
+    assert overlay.cursor().shape() == Qt.CursorShape.SizeFDiagCursor  # 左上角
+    hover(overlay, QPoint(690, 250))
+    assert overlay.cursor().shape() == Qt.CursorShape.SizeFDiagCursor  # 右下角的拉手
+    hover(overlay, QPoint(350, 130))
+    assert overlay.cursor().shape() == Qt.CursorShape.ArrowCursor  # 中间：拖动是移动窗口
+    assert overlay._hover
+    overlay.grab()  # 鼠标在窗口上时多画边框、拉手和调字号的按钮：画得出来不报错
+    QApplication.sendEvent(overlay, QEvent(QEvent.Type.Leave))
+    assert not overlay._hover
+
+
+def test_text_refills_the_window_when_it_is_resized(overlay):
+    for i in range(12):
+        overlay.set_unit(UnitSnapshot(i, "une phrase assez longue pour passer à la ligne " * 2, "一句比较长的译文" * 6, True, ""))
+    overlay.set_live("", "suite")
+    settle(overlay)
+    narrow_height = overlay.captions._items[-1].height
+    view = overlay.captions.view_height()
+    overlay.resize(1100, 520)  # 拉宽、拉高
+    QApplication.processEvents()
+    assert overlay.captions._items[-1].height < narrow_height  # 每行放得下更多字：折的行少了
+    assert overlay.captions.view_height() > view  # 上面能看到的历史更多了
+    assert overlay.font_size == 22  # 字号不跟着窗口变：字号单独调
+
+
+def test_font_can_be_changed_right_on_the_overlay(overlay):
+    overlay.setGeometry(100, 300, 700, 260)
+    QApplication.processEvents()
+    smaller, bigger = overlay._font_buttons()
+    QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=bigger.center())
+    assert overlay.font_size == 24 and overlay.geometry() == QRect(100, 300, 700, 260)  # 点按钮不会拖动窗口
+    assert overlay._note_text == "字号 24" and int(overlay.settings.value("font_size")) == 24  # 提示一下，并马上记下
+    QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=smaller.center())
+    QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=smaller.center())
+    assert overlay.font_size == 20
+
+    def wheel(dy, modifiers):
+        center = QPointF(350, 130)
+        event = QWheelEvent(center, QPointF(overlay.mapToGlobal(center.toPoint())), QPoint(0, 0), QPoint(0, dy),
+                            Qt.MouseButton.NoButton, modifiers, Qt.ScrollPhase.NoScrollPhase, False)
+        QApplication.sendEvent(overlay, event)
+
+    wheel(120, Qt.KeyboardModifier.ControlModifier)  # ⌘ + 滚轮（Windows 上是 Ctrl）
+    assert overlay.font_size == 22
+    for _ in range(3):
+        wheel(40, Qt.KeyboardModifier.ControlModifier)  # 触控板一点一点给：攒够一格才变
+    assert overlay.font_size == 24
+    wheel(-120, Qt.KeyboardModifier.NoModifier)  # 不按 ⌘：照常是翻历史，不改字号
+    assert overlay.font_size == 24
+    overlay.zoom_by(0.05)  # 双指捏合：攒够 8% 才变一档
+    assert overlay.font_size == 24
+    overlay.zoom_by(0.05)
+    assert overlay.font_size == 26
+    overlay.zoom_by(-0.20)  # 加上之前剩下的 2%，一共缩小 18%：两档
+    assert overlay.font_size == 22
+
+
+def test_collapsed_pill_cannot_be_resized(overlay):
+    overlay.set_collapsed(True)
+    assert overlay.size().toTuple() == PILL_SIZE  # 小条比展开时的最小尺寸小
+    assert not overlay._edges_at(QPoint(1, 1))
+    overlay.set_collapsed(False)
+    assert overlay.minimumWidth() == MIN_WIDTH
