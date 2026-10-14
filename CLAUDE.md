@@ -14,7 +14,7 @@
 - 翻译 API 的密钥只放在 `.env`，永远不要提交，也不要打印出来。
 
 ## 在 Windows 上继续开发（交接说明）
-Windows 部分（`audio/windows_loopback.py`、`asr/faster_whisper_backend.py`）是在 Mac 上写的，**还没有在 Windows 真机上运行过**。CI 只保证能安装、能导入、逻辑测试通过。在 Windows 上建议按这个顺序验证：
+Windows 部分（`audio/windows_loopback.py`、`asr/faster_whisper_backend.py`）是在 Mac 上写的，**还没有在 Windows 真机上运行过**。面向用户的 Windows 安装和使用说明在 `README.windows.md`，在 Windows 上验证过哪一步，就同步修正它。CI 只保证能安装、能导入、逻辑测试通过。在 Windows 上建议按这个顺序验证：
 1. 建环境：`python -m venv .venv`，`.venv\Scripts\pip install -r requirements.txt`；复制 `config.example.toml` 为 `config.toml`、`.env.example` 为 `.env`。
 2. 内录：`python -m simul_interp record --seconds 10`，同时用浏览器播放声音，看音量条是否正常；停止播放后应该是静音（-120 dBFS），而不是卡住——WASAPI loopback 没声音时不回调，靠 `GapFiller` 补静音。
 3. 识别模型：faster-whisper 的 large-v3-turbo 约 1.6 GB（和 Mac 上一样用 turbo），**下载前先问用户**，同意后在 `config.toml` 里设 `[asr] allow_download = true`。有 NVIDIA 显卡时确认用上了 CUDA（没有显卡的话很难做到实时，要和用户商量）。
