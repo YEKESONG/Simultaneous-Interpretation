@@ -37,6 +37,7 @@
 - [x] S25 采用 GPL-3.0 许可证；精简 README
 - [x] S26 Windows 实机测试交接文档；README 去掉开发说明，进度清单移到这里
 - [x] S27 Windows 实测：显卡识别用 pip 装的 CUDA 12 库，不必另装 CUDA Toolkit 和 cuDNN
+- [x] S28 Windows 实测：faster-whisper 每次识别的日志不再刷屏
 
 ---
 
@@ -1065,3 +1066,15 @@ S13 的做法是干脆不显示暂定文字，而用户其实想看到正在说�
 **验证**：不加修复时报找不到 `cublas64_12.dll`；加了以后 `device="auto"` 选中 CUDA、float16，加载模型 4.2 秒，5 秒音频识别 0.30 秒，带逐词时间戳也正常。pytest 127 个通过。
 
 **经验**：`get_cuda_device_count()` 只说明驱动能看到显卡，不说明 cuBLAS、cuDNN 能加载；这些库是第一次真正用显卡时才加载的，检查要真跑一次识别。
+
+---
+
+## S28 · Windows 实测：faster-whisper 的日志不再刷屏（2026-10-14）
+
+**问题**：跑 `bench-asr` 时，faster-whisper 每识别一次就记一条 `INFO Processing audio with duration …`，每 0.6 秒一条，把有用的输出淹没了。Mac 上的 MLX 后端没有这种日志，所以以前没发现。
+
+**做法**：和原来处理 httpx 日志的办法一样，不加 `-v` 时把 `faster_whisper` 的日志级别调到 WARNING。
+
+**主要文件**：`simul_interp/__main__.py`
+
+**验证**：`bench-asr samples\fr_continuous.wav` 的输出里不再有这条日志；pytest 127 个通过。

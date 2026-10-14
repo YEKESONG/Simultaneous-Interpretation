@@ -33,8 +33,9 @@ def setup_logging(verbose: bool) -> None:
         format="%(asctime)s %(levelname)-7s %(message)s",
         datefmt="%H:%M:%S",
     )
-    if not verbose:  # httpx 会把每一次翻译请求都记一条 INFO 日志，同传时会刷屏
+    if not verbose:  # httpx 每次翻译请求、faster-whisper 每次识别都记一条 INFO 日志，同传时会刷屏
         logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("faster_whisper").setLevel(logging.WARNING)
 
 
 def cmd_config(args: argparse.Namespace) -> int:
