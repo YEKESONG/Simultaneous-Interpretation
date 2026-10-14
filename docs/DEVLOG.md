@@ -36,6 +36,7 @@
 - [x] S24 README 按常见格式重写（macOS），新增 Windows 版 README
 - [x] S25 采用 GPL-3.0 许可证；精简 README
 - [x] S26 Windows 实机测试交接文档；README 去掉开发说明，进度清单移到这里
+- [x] S27 Windows 实测：显卡识别用 pip 装的 CUDA 12 库，不必另装 CUDA Toolkit 和 cuDNN
 
 ---
 
@@ -1046,3 +1047,21 @@ S13 的做法是干脆不显示暂定文字，而用户其实想看到正在说�
 **验证**：两份 README 和交接文档里的站内链接都有效；交接文档里的命令和参数对照了代码（`record --out`、`--set` 的写法、模型仓库名、`MIN_FILLER_PROB`）；参考数据摘自 DEVLOG S12、S21。Windows 上能不能照着跑通，要等实测。
 
 **经验**：跨机器、跨会话交接时，与其让对方回看全部过程，不如把“要做什么、怎么算做完、和什么比、哪里最可能出问题”整理成一页。过程留在 DEVLOG 里，需要时按节去查。
+
+---
+
+## S27 · Windows 实测：显卡识别用 pip 装的 CUDA 12 库（2026-10-14）
+
+**问题**：第一次在 Windows 真机上跑。这台电脑装的是 CUDA Toolkit 13.0，没有 cuDNN。ctranslate2 4.8.3 要的是 `cublas64_12.dll` 和 cuDNN 9（自带的 `cudnn64_9.dll` 只是加载器，真正的子库要另装）。`ctranslate2.get_cuda_device_count()` 照样返回 1，可是一识别就报 `Library cublas64_12.dll is not found or cannot be loaded`。按 README 原来的写法，要再装 CUDA Toolkit 12（约 3 GB）和 cuDNN 9（要注册 NVIDIA 账号才能下载）。
+
+**做法**
+- 和用户商量后改用 pip：`nvidia-cublas-cu12` 和 `nvidia-cudnn-cu12` 只装进 `.venv`（约 1 GB），不动系统，也不和已经装的 CUDA 13 冲突。
+- 这两个包把 DLL 放在 `site-packages\nvidia\*\bin`，Windows 默认不去那里找。`FasterWhisperBackend.load()` 在导入 faster-whisper 之前先把这些目录加到 `PATH` 前面；没装这两个包时什么都不做，系统装的 CUDA 12 照样能用。
+- 试过只用 `os.add_dll_directory`：不管用，ctranslate2 第一次用显卡时才按 `PATH` 去加载 cuBLAS。所以只改 `PATH`。
+- 没有写进 `requirements.txt`：只用 CPU 的人和 CI 不需要多下 1 GB。README 第 3 步改成这条 `pip install`。
+
+**主要文件**：`simul_interp/asr/faster_whisper_backend.py`、`README.windows.md`
+
+**验证**：不加修复时报找不到 `cublas64_12.dll`；加了以后 `device="auto"` 选中 CUDA、float16，加载模型 4.2 秒，5 秒音频识别 0.30 秒，带逐词时间戳也正常。pytest 127 个通过。
+
+**经验**：`get_cuda_device_count()` 只说明驱动能看到显卡，不说明 cuBLAS、cuDNN 能加载；这些库是第一次真正用显卡时才加载的，检查要真跑一次识别。

@@ -9,6 +9,9 @@
 from __future__ import annotations
 
 import logging
+import os
+import sys
+from pathlib import Path
 
 import numpy as np
 
@@ -16,6 +19,22 @@ from .common import HALLUCINATIONS, merge_word_pieces
 from .types import Segment
 
 logger = logging.getLogger(__name__)
+
+
+def _add_nvidia_dll_dirs() -> None:
+    """Windows：让 ctranslate2 找到 pip 装的 CUDA 12 库（nvidia-cublas-cu12、nvidia-cudnn-cu12）。
+
+    ctranslate2 要 cublas64_12.dll 和 cuDNN 9，第一次用显卡时才按 PATH 去找（os.add_dll_directory 不管用，
+    实测过）。这两个包把 DLL 放在 site-packages/nvidia/*/bin，不在 PATH 里，所以加进去。
+    没装这两个包时什么都不做，用系统里装的 CUDA Toolkit 12 和 cuDNN 9。"""
+    if sys.platform != "win32":
+        return
+    try:
+        import nvidia  # 命名空间包，只有装了上面的包才有
+    except ImportError:
+        return
+    dirs = [str(d) for root in nvidia.__path__ for d in sorted(Path(root).glob("*/bin"))]
+    os.environ["PATH"] = os.pathsep.join([*dirs, os.environ.get("PATH", "")])
 
 
 class FasterWhisperBackend:
@@ -37,6 +56,7 @@ class FasterWhisperBackend:
     def load(self) -> None:
         if self._model is not None:
             return
+        _add_nvidia_dll_dirs()
         from faster_whisper import WhisperModel
 
         logger.info("加载识别模型 %s（device=%s）……", self.model_id, self.device)

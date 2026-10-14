@@ -43,7 +43,13 @@ py -3.12 -m venv .venv
 
 ### 3. 配置 GPU（可选）
 
-安装 [NVIDIA 驱动](https://www.nvidia.com/Download/index.aspx)、[CUDA Toolkit 12](https://developer.nvidia.com/cuda-downloads) 和 [cuDNN 9](https://developer.nvidia.com/cudnn)，详见 [faster-whisper 的说明](https://github.com/SYSTRAN/faster-whisper#gpu)。检查（输出大于 0 即可）：
+安装最新的 [NVIDIA 驱动](https://www.nvidia.com/Download/index.aspx)，再把 CUDA 12 的 cuBLAS 和 cuDNN 9 装进虚拟环境（约 1 GB；不需要另装 CUDA Toolkit，已经装了 13 版也不影响）：
+
+```powershell
+.venv\Scripts\pip install nvidia-cublas-cu12 "nvidia-cudnn-cu12>=9,<10"
+```
+
+检查（输出大于 0 即可）：
 
 ```powershell
 .venv\Scripts\python -c "import ctranslate2; print(ctranslate2.get_cuda_device_count())"
@@ -116,7 +122,7 @@ copy config.example.toml config.toml
 |---|---|
 | `py` 或 `git` 不是内部或外部命令 | 重新打开 PowerShell；仍然不行时重新安装 |
 | 提示本地没有找到模型 | 完成安装第 4 步 |
-| 找不到 `cublas64_12.dll` 或 `cudnn*64_9.dll` | 完成安装第 3 步，或改用 CPU |
+| 找不到 `cublas64_12.dll` 或 `cudnn*64_9.dll` | 完成安装第 3 步的 `pip install`，或改用 CPU |
 | 识别跟不上语速 | 确认 GPU 可用（安装第 3 步的检查命令） |
 | 只有原文，没有译文 | 检查 `.env` 中的密钥和账户余额 |
 | 依赖下载慢 | `pip install` 加 `-i https://pypi.tuna.tsinghua.edu.cn/simple` |
