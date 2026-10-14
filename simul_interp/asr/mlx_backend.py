@@ -26,7 +26,7 @@ def resolve_local_model(repo_id: str) -> str:
     except LocalEntryNotFoundError as exc:
         raise RuntimeError(
             f"本地没有找到识别模型 {repo_id}。模型有一两 GB，程序不会自动下载，"
-            f"请在项目文件夹里运行下面这行命令下载（README 安装第 6 步）：\n"
+            f"请在项目文件夹里运行下面这行命令下载（README.macos.md 安装第 4 步）：\n"
             f"    .venv/bin/hf download {repo_id}\n"
             f"在中国大陆下载很慢或连不上时，在命令前面加上 HF_ENDPOINT=https://hf-mirror.com 再运行。"
         ) from exc

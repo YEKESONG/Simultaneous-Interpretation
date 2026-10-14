@@ -4,7 +4,7 @@
 cd "$(dirname "$0")" || exit 1
 if [ ! -x .venv/bin/python ]; then
   echo "还没有安装好：没有找到 .venv（项目的 Python 环境）。"
-  echo "请先按 README 里“安装”一节的步骤操作。"
+  echo "请先按 README.macos.md 里“安装”一节的步骤操作。"
   read -r -p "按回车关闭这个窗口……"
   exit 1
 fi

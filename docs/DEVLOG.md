@@ -41,6 +41,7 @@
 - [x] S29 Windows 实测：内录时点“退出”程序崩溃（两个线程同时关同一个录音流）
 - [x] S30 Windows 实测记录：交接清单 10 项全部通过；去掉“未在实机上验证”的说明
 - [x] S31 Windows 实测完成，删除交接文档
+- [x] S32 GitHub 首页改为 Windows 版 README，macOS 版移到 README.macos.md
 
 ---
 
@@ -1178,3 +1179,21 @@ S13 的做法是干脆不显示暂定文字，而用户其实想看到正在说�
 **验证**：仓库里除了 DEVLOG 的历史记录，已经没有指向这份文档的地方；pytest 全部通过。
 
 **说明**：删除只影响最新版本。之前的提交里仍然能看到这份文档；要彻底清除，需要改写提交历史并强制推送，这次没有做。
+
+---
+
+## S32 · 首页改为 Windows 版 README（2026-10-15）
+
+**问题（用户的需求）**：Windows 版已经实测通过（S30），用户希望把 Windows 版 README 作为项目的主要展示，macOS 版改为从首页跳转过去。
+
+**做法**
+- 用 `git mv` 交换文件名，保留各自的修改历史：Windows 版改为 `README.md`（GitHub 首页显示的文件），macOS 版改为 `README.macos.md`。
+- 首页补上原来只在 macOS 版里的“功能”（识别后端写成 Windows 上的 faster-whisper，支持 NVIDIA 显卡）、控制面板截图和“工作原理”（采集方式写成两个平台各自的做法）；macOS 版的“工作原理”改为一句链接回首页。
+- 两份顶部的切换链接改成“**Windows** · macOS”和“Windows · **macOS**”，macOS 版标题加上“（macOS）”。
+- 同步修改其他提到 README 的地方：`CLAUDE.md`、`启动同传.command`（还没安装时的提示）、Mac 上找不到识别模型时的报错。报错里原来写的是“安装第 6 步”，S25 精简后模型下载已经是第 4 步，这次一起改正。
+
+**主要文件**：`README.md`、`README.macos.md`（由 `README.md` 改名）、`CLAUDE.md`、`启动同传.command`、`simul_interp/asr/mlx_backend.py`
+
+**验证**：两份 README 的站内链接全部有效，仓库里（开发日志的历史记录除外）已没有 `README.windows.md` 的引用；pytest 全部通过。
+
+**经验**：改文档结构时，顺手搜一遍代码和脚本里对文档的引用，比如报错信息里的“第几步”。文档精简过一次之后，这类引用很容易失效。
