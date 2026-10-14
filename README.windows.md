@@ -130,7 +130,7 @@ git pull
 
 卸载时删除项目目录和 `%USERPROFILE%\.cache\huggingface\hub\models--mobiuslabsgmbh--faster-whisper-large-v3-turbo`。
 
-工作原理和开发说明见 [macOS 版 README](README.md#工作原理)。
+工作原理见 [macOS 版 README](README.md#工作原理)。
 
 ## 许可证
 

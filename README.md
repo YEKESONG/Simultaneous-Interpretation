@@ -143,50 +143,6 @@ git pull && .venv/bin/pip install -r requirements.txt
 
 系统声音由 Core Audio Taps 采集（Windows 上是 WASAPI loopback）。识别用 LocalAgreement 策略实现流式输出；翻译在句子说完前先出草稿，整句确认后替换为正式译文。设计过程和测试数据见 [docs/DEVLOG.md](docs/DEVLOG.md)。
 
-## 开发
-
-```bash
-.venv/bin/python -m pytest
-.venv/bin/python scripts/make_test_audio.py
-.venv/bin/python -m simul_interp bench-pipeline samples/fr_meeting.wav
-```
-
-开发约定见 [CLAUDE.md](CLAUDE.md)。项目按阶段提交，可以用 `git log --reverse` 按顺序查看。
-
-<details>
-<summary>开发进度</summary>
-
-- [x] S0 项目骨架与开发规范
-- [x] S1 macOS 系统声音采集
-- [x] S2 音频文件模拟源与测试音频
-- [x] S3 语音检测与分段
-- [x] S4 Whisper 流式识别
-- [x] S5 流式翻译
-- [x] S6 串起完整流程（终端版）
-- [x] S7 透明悬浮字幕窗
-- [x] S8 Windows 支持（代码和自动测试已完成，未在 Windows 真机上验证）
-- [x] S9 延迟优化（测量工具、停顿时提前识别、量化选项、投机翻译）
-- [x] S10 真实内录端到端验证；全程序统一高精度时钟
-- [x] S11 默认 4 位量化；真实翻译 API 实测
-- [x] S12 实时识别改用 turbo（对比实验后由用户决定）
-- [x] S13 字幕窗改版：原文译文成对同步出现，不闪不跳
-- [x] S13b 当前句区域：暂定文字只在预留的空白里更新，译文填进留白
-- [x] S14 录音保存：内录时同步存一份 WAV，方便事后对照录音校对译文
-- [x] S14b 会话记录里的时间改成录音里的位置
-- [x] S15 杂音时段不再输出 “Merci.”（整句只有它时向识别模型核实）
-- [x] S16 没说完的半句话先等一等：说话人停下来想词时不再把一句话切成两半
-- [x] S17 字幕窗可以往回翻看：滚轮或右侧的滑动条，回看时眼前的内容不动
-- [x] S18 字幕窗可以收起成一个小条，点一下再展开
-- [x] S19 流水线支持暂停 / 继续，以及运行中换语言（法、英、西、德、意、葡 → 任意目标语言）
-- [x] S20 应用前端：控制面板（换语言、开始 / 暂停监听、管理字幕窗），双击就能启动
-- [x] S21 边说边译：话还没说完就出中文草稿，看到法语之后约 1 秒就能看到中文（原来要等整句说完）
-- [x] S22 字幕窗任意边角都能拖动改大小，文字跟着重新排满；字号直接在字幕窗上调（A− / A+、⌘ + 滚轮、双指捏合）
-- [x] S23 README 改成从零开始的安装和使用教程（在全新的环境里照着做了一遍）
-- [x] S24 README 按常见格式重写（macOS），新增 Windows 版 README
-- [x] S25 采用 GPL-3.0 许可证；精简 README
-
-</details>
-
 ## 许可证
 
 [GPL-3.0](LICENSE)。可以自由使用、修改和再发布（包括商用），但发布修改后的版本时必须同样以 GPL-3.0 公开源代码。
