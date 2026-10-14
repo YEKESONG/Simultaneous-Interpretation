@@ -172,11 +172,13 @@ def test_slow_translation_falls_back_after_waiting(overlay):
     overlay.set_unit(unit(0, "半句", done=False))  # 译文开始出来了，但迟迟没翻完
     overlay.set_live("", "suite")
     start = overlay._first_text_at[0]
+    # 时间都比界限多给 1 毫秒：时钟读数刚好在 2 的整数次幂下面时，(t + 1.0) - t 会算成 0.99999999999997，
+    # 正好卡在界限上的比较就会偶尔失败（S34，CI 的 macOS 机器上碰到过）
     assert overlay.compose(start + STREAM_FALLBACK_S / 2)[1][0] == "unit"  # 先等着
-    assert overlay.compose(start + STREAM_FALLBACK_S)[1][0] == "live"  # 等太久就往下走
+    assert overlay.compose(start + STREAM_FALLBACK_S + 0.001)[1][0] == "live"  # 等太久就往下走
     overlay.set_unit(unit(1))  # 一个字都没出来
     seen = overlay._seen_at[1]
-    assert [u.id for u in overlay.compose(seen + WAIT_FALLBACK_S)[0]] == [0, 1]
+    assert [u.id for u in overlay.compose(seen + WAIT_FALLBACK_S + 0.001)[0]] == [0, 1]
 
 
 def test_escaping_error_and_dimming(overlay):
