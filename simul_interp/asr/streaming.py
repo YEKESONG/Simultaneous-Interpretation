@@ -157,7 +157,6 @@ class StreamingTranscriber:
         self.buffer = np.zeros(0, dtype=np.float32)
         self.utterance_start = start  # 这句话（含句首预留）开始的音频流时间
         self.buffer_start = start  # 缓冲区第一个采样点的音频流时间
-        self.last_speech_end = start  # VAD 认为“真的有人在说话”的最后一块的结束时间
         self._speech_spans: list[tuple[float, float]] = []  # 被 VAD 标为说话的时间段（音频流时间）
         self.committed: list[str] = []  # 缓冲区里已确认（已发出去）的词，只追加，切缓冲区时移到 history
         self.tail: list[str] = []  # 上一次识别里还没确认的词
@@ -203,7 +202,6 @@ class StreamingTranscriber:
                 self._speech_spans[-1] = (self._speech_spans[-1][0], self.buffer_end)  # 和上一段连着，合并
             else:
                 self._speech_spans.append((start, self.buffer_end))
-            self.last_speech_end = self.buffer_end
 
     @property
     def speech_in_buffer_s(self) -> float:

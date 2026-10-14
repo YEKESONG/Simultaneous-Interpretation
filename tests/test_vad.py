@@ -10,7 +10,7 @@ def run(probs, **kwargs):
     seg = VadSegmenter(**kwargs)
     events = []
     for i, p in enumerate(probs):
-        chunk = AudioChunk(np.zeros(CHUNK_SAMPLES, np.float32), i * DT, 0.0)
+        chunk = AudioChunk(np.zeros(CHUNK_SAMPLES, np.float32), i * DT)
         events += seg.process(chunk, p)
     return events, seg
 

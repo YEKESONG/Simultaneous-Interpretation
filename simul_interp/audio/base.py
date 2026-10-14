@@ -14,7 +14,6 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ..clock import now
 
 SAMPLE_RATE = 16000
 CHUNK_SAMPLES = 512
@@ -24,7 +23,6 @@ CHUNK_SAMPLES = 512
 class AudioChunk:
     samples: np.ndarray  # float32，长度 CHUNK_SAMPLES
     start: float  # 这一块在音频流里的起始时间（秒），按采样点数计算，不受处理快慢影响
-    received_at: float  # 收到这一块的时刻（clock.now），用来统计延迟
 
     @property
     def end(self) -> float:
@@ -93,7 +91,6 @@ class AudioSource:
             yield item
 
     def _feed(self, samples: np.ndarray) -> None:
-        received = now()
         with self._lock:
             if self._paused:
                 return
@@ -101,7 +98,7 @@ class AudioSource:
             count = len(pending) // CHUNK_SAMPLES
             for i in range(count):
                 block = pending[i * CHUNK_SAMPLES : (i + 1) * CHUNK_SAMPLES].copy()
-                self._queue.put(AudioChunk(block, self._samples_emitted / SAMPLE_RATE, received))
+                self._queue.put(AudioChunk(block, self._samples_emitted / SAMPLE_RATE))
                 self._samples_emitted += CHUNK_SAMPLES
             self._pending = pending[count * CHUNK_SAMPLES :]
 

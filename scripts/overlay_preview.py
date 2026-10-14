@@ -2,6 +2,7 @@
 """不跑识别和翻译，只用示例文字把悬浮字幕窗渲染成 PNG，用来调样式、给 README 配图。
 
 窗口不会显示在屏幕上：QWidget.grab() 可以直接把没显示的窗口画到图片里。
+用法：QT_QPA_PLATFORM=offscreen QT_SCALE_FACTOR=2 .venv/bin/python scripts/overlay_preview.py（2 倍是为了高清）
 为了看出半透明效果，图片背景画了一块模拟视频画面的渐变色。
 """
 
@@ -22,13 +23,13 @@ from simul_interp.config import UiConfig  # noqa: E402
 from simul_interp.ui.overlay import Overlay, UnitSnapshot  # noqa: E402
 
 EXAMPLES = [  # 示例文字（译文为手写示例，不是 API 输出）
-    UnitSnapshot(0, "Les résultats sont encourageants, le taux d'erreur est passé de 12 à 7%.",
-                 "结果令人鼓舞，错误率从 12% 降到了 7%。", True, ""),
-    UnitSnapshot(1, "Cependant, il reste plusieurs problèmes à résoudre, notamment la latence,",
+    UnitSnapshot(0, "Cependant, il reste plusieurs problèmes à résoudre, notamment la latence,",
                  "不过还有几个问题要解决，尤其是延迟，", True, ""),
-    UnitSnapshot(2, "qui est encore trop élevée pour une utilisation en temps réel.",
+    UnitSnapshot(1, "qui est encore trop élevée pour une utilisation en temps réel.",
                  "它对实时使用来说还是太高了。", True, ""),
 ]
+# 正在说的下一句：已确认的原文、暂定的尾巴、到目前为止的译文草稿
+LIVE = ("Pour la suite, je propose que nous organisions", "une démonstration", "接下来，我建议我们组织")
 
 
 def main() -> int:
@@ -38,11 +39,10 @@ def main() -> int:
     settings = QSettings(str(Path(tempfile.mkdtemp()) / "preview.ini"), QSettings.Format.IniFormat)
     overlay = Overlay(UiConfig(), settings=settings)
     overlay.font_size, overlay.opacity = 22, 0.6
-    overlay.resize(920, 300)
+    overlay.resize(920, 290)
     for unit in EXAMPLES:
         overlay.set_unit(unit)
-    # 下一句正在识别：显示在底部的当前句区域，暂定部分灰色，译文的位置先留白
-    overlay.set_live("Est-ce que quelqu'un a des", "questions sur ce point", "")
+    overlay.set_live(*LIVE)  # 显示在底部的当前句区域：暂定部分灰色，下面是译文草稿
     overlay.set_status("")
     overlay.refresh()
     overlay.captions._anim.stop()

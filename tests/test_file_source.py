@@ -34,13 +34,14 @@ def test_file_is_split_and_tail_silence_appended(tmp_path):
 def test_realtime_pacing(tmp_path):
     wav = tmp_path / "tone.wav"
     make_tone(wav, 0.5)
-    started = now()  # 必须和程序里的 received_at 用同一个时钟
-    chunks = collect(FileAudioSource(wav, speed=1.0, tail_silence_s=0.0))
-    elapsed = now() - started
+    source = FileAudioSource(wav, speed=1.0, tail_silence_s=0.0)
+    started = now()
+    source.start()
+    arrivals = [(now() - started, chunk.end) for chunk in source.chunks()]  # (拿到这一块的时刻, 它的结束时间)
+    source.stop()
     # 按实时速度送，0.5 秒的音频大约要 0.5 秒送完；每一块都在“播放完”之后才送出
-    assert 0.45 < elapsed < 0.8
-    for chunk in chunks:
-        assert chunk.received_at - started >= chunk.end - 0.01
+    assert 0.45 < arrivals[-1][0] < 0.8
+    assert all(arrived >= end - 0.01 for arrived, end in arrivals)
 
 
 def test_paused_file_waits_and_then_plays_everything(tmp_path):

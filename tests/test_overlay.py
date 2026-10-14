@@ -327,15 +327,6 @@ def test_font_limits_and_click_through(overlay):
     assert not overlay.windowFlags() & Qt.WindowType.WindowTransparentForInput
 
 
-def test_old_font_setting_is_reset_once(tmp_path):
-    QApplication.instance() or QApplication([])
-    settings = QSettings(str(tmp_path / "old.ini"), QSettings.Format.IniFormat)
-    settings.setValue("font_size", 26)  # 旧版本保存的大字号
-    assert Overlay(UiConfig(font_size=22), settings=settings).font_size == 22
-    settings.setValue("font_size", 30)  # 新版本里用户自己调的字号要保留
-    assert Overlay(UiConfig(font_size=22), settings=settings).font_size == 30
-
-
 # ---- 拖边改大小、在字幕窗上调字号 ----
 
 

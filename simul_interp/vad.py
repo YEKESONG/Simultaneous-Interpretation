@@ -38,9 +38,6 @@ class SileroVad:
         with self._torch.no_grad():
             return float(self._model(self._torch.from_numpy(samples), SAMPLE_RATE))
 
-    def reset(self) -> None:
-        self._model.reset_states()
-
 
 @dataclass
 class VadEvent:
