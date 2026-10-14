@@ -14,7 +14,7 @@
 - 翻译 API 的密钥只放在 `.env`，永远不要提交，也不要打印出来。
 
 ## 在 Windows 上继续开发
-Windows 部分是在 Mac 上写的，**还没有在 Windows 真机上运行过**（CI 只保证能安装、能导入、单元测试通过）。在 Windows 上工作时，先读 `docs/windows-handoff.md`：里面有逐项测试清单、Mac 上的参考数据和已知的可疑点，读完就能开始，不需要通读 DEVLOG。用户看的安装说明在 `README.windows.md`，实测和它不符的地方要同步修正。
+Windows 部分是在 Mac 上写的，2026-10-14 在一台 Windows 11 笔记本（RTX 4060 Laptop）上按清单实测通过（DEVLOG S27～S30，结果和数字见 S30）。在 Windows 上工作时，先读 `docs/windows-handoff.md`：里面有逐项测试清单、参考数据和已知的可疑点，改了 Windows 相关代码后照它回归测试，不需要通读 DEVLOG。用户看的安装说明在 `README.windows.md`，实测和它不符的地方要同步修正。
 
 ## 不要提交
 `config.toml`、`.env`、任何音频文件、`transcripts/`、`recordings/`、`bin/`。用户的真实录音只能在本地测试用，不能进仓库；录音里的原话和具体内容也不能出现在 DEVLOG、提交说明、测试数据和代码注释里（统计数字可以写；要举例子就编一句结构相同的。S16 差点把会议里的原话当测试句子推上去）。

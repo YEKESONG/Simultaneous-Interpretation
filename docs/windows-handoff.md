@@ -2,6 +2,8 @@
 
 写给在 Windows 电脑上接手的 Claude Code 和用户。读完这一份就可以开始，不需要通读 `docs/DEVLOG.md`（很长；需要时只看文中点名的几节）。
 
+> **状态**：2026-10-14 在 Windows 11 笔记本（i7-13700H、RTX 4060 Laptop）上把下面 10 项全部跑通，修了 3 处（S27～S29），机器配置、每一项的结果和数字见 DEVLOG S30。以后改了 Windows 相关代码，照这份清单回归测试即可。
+
 ## 目标
 
 Windows 版的代码（DEVLOG S8 起）是在 Mac 上写的，从没在 Windows 实机上运行过。GitHub Actions（windows-latest）只验证了依赖能安装、模块能导入、单元测试能通过。
@@ -25,7 +27,7 @@ Windows 版的代码（DEVLOG S8 起）是在 Mac 上写的，从没在 Windows 
 2. 从 Mac 拷过来两样东西（都不在 git 里）：
    - `samples/` 整个文件夹：合成的法语测试音频 `fr_meeting.wav`、`fr_continuous.wav`，对应的文本 `*.txt`，以及识别计时参照 `*.ref.json`。Windows 上没有 macOS 的 `say`，没法重新生成。
    - `.env`：翻译 API 密钥。不要把密钥贴进对话。
-3. 有 NVIDIA 显卡时，装好驱动、CUDA 12 和 cuDNN 9（`README.windows.md` 第 3 步）。
+3. 有 NVIDIA 显卡时，装好驱动，再用 pip 把 CUDA 12 的 cuBLAS 和 cuDNN 9 装进 `.venv`（`README.windows.md` 第 3 步，S27）。
 4. 推送需要这台电脑登录 GitHub：Git for Windows 第一次 `git push` 时会弹出登录窗口。
 
 ## 相关代码
@@ -49,7 +51,7 @@ Windows 版的代码（DEVLOG S8 起）是在 Mac 上写的，从没在 Windows 
 .venv\Scripts\python -m pytest
 ```
 
-预期全部通过（写这份文档时是 127 个）。
+预期全部通过（S29 之后是 128 个）。
 
 **2. GPU**
 
@@ -57,7 +59,7 @@ Windows 版的代码（DEVLOG S8 起）是在 Mac 上写的，从没在 Windows 
 .venv\Scripts\python -c "import ctranslate2; print(ctranslate2.get_cuda_device_count())"
 ```
 
-预期大于 0。没有 NVIDIA 显卡时，在 `config.toml` 的 `[asr]` 里设 `device = "cpu"`、`compute_type = "int8"`，并告诉用户 CPU 上大概率做不到实时，商量要不要继续。
+预期大于 0。注意这只说明驱动能看到显卡，cuBLAS、cuDNN 能不能加载要到第 5 步真正识别时才知道（S27）。没有 NVIDIA 显卡时，在 `config.toml` 的 `[asr]` 里设 `device = "cpu"`、`compute_type = "int8"`，并告诉用户 CPU 上大概率做不到实时，商量要不要继续。
 
 **3. 识别模型**（先问用户）
 

@@ -7,9 +7,6 @@
 
 [macOS](README.md) · **Windows**
 
-> [!WARNING]
-> Windows 版本尚未在实体机上验证，只在 GitHub Actions 的 Windows 虚拟机上通过了安装和单元测试。遇到问题请提交 [Issue](https://github.com/YEKESONG/Simultaneous-Interpretation/issues)，附上 `.venv\Scripts\python -m simul_interp -v run` 的输出。
-
 ![字幕窗](docs/overlay_preview.png)
 
 ## 要求
@@ -122,6 +119,7 @@ copy config.example.toml config.toml
 |---|---|
 | `py` 或 `git` 不是内部或外部命令 | 重新打开 PowerShell；仍然不行时重新安装 |
 | 提示本地没有找到模型 | 完成安装第 4 步 |
+| 下载模型时提示 symlinks、Developer Mode | 可以忽略，模型照常下载，只是多占一点磁盘 |
 | 找不到 `cublas64_12.dll` 或 `cudnn*64_9.dll` | 完成安装第 3 步的 `pip install`，或改用 CPU |
 | 识别跟不上语速 | 确认 GPU 可用（安装第 3 步的检查命令） |
 | 只有原文，没有译文 | 检查 `.env` 中的密钥和账户余额 |

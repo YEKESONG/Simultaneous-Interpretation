@@ -1,9 +1,9 @@
 """Windows（以及 Linux）识别后端：faster-whisper（CTranslate2）。有 NVIDIA 显卡时用 CUDA。
 
-和 macOS 的 MLX 后端用同一个模型（Whisper large-v3），只是格式不同。默认不自动下载模型（约 3 GB），
+和 macOS 的 MLX 后端用同一个模型（Whisper large-v3 turbo），只是格式不同。默认不自动下载模型（约 1.6 GB），
 需要在 config.toml 里设 [asr] allow_download = true 才会下载。
 
-注意：这部分代码没有在 Windows 实机上运行过；转换逻辑有单元测试（用假的 WhisperModel）。
+在 Windows 实机（RTX 4060 Laptop，CUDA float16）上测过，延迟和准确率见 DEVLOG S30。
 """
 
 from __future__ import annotations
@@ -108,8 +108,8 @@ class FasterWhisperBackend:
         """模型认为这段音频的第一个词就是 word 的概率（含义见 MlxWhisperBackend.word_probability）。
 
         faster-whisper 的逐词时间戳里自带每个词的概率，算法相同，所以带着逐词时间戳重新识别一次、
-        取第一个词的；第一个词不是 word 就返回 0。比 MLX 那边的做法慢（要完整解码一遍）。
-        和这个文件的其余部分一样，没有在 Windows 实机上运行过。"""
+        取第一个词的；第一个词不是 word 就返回 0。比 MLX 那边的做法慢（要完整解码一遍，实测每次 0.4～0.6 秒）。
+        实测：真的 “Merci” 0.80～0.94，杂音上编出来的都不超过 0.43（DEVLOG S30）。"""
         segments, _ = self._model.transcribe(
             audio,
             language=self.language,
