@@ -44,6 +44,8 @@ class AudioSource:
         # 每取出一块音频，先交给它一份（录音保存用）。在调用 chunks() 的线程里执行，
         # 所以它拿到的和后面的语音检测、识别拿到的是同一串音频，一块不多一块不少
         self.on_chunk: Callable[[AudioChunk], None] | None = None
+        # 音源遇到要让用户知道的情况（比如没有权限、设备断开）时调用，显示在界面上；空字符串表示恢复正常
+        self.on_status: Callable[[str], None] | None = None
 
     def start(self) -> None:
         raise NotImplementedError

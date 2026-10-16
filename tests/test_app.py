@@ -106,5 +106,7 @@ def test_no_subcommand_means_run():
     assert with_default_command([]) == ["run"]  # 双击启动、python -m simul_interp
     assert with_default_command(["--set", "asr.language=en"]) == ["--set", "asr.language=en", "run"]
     assert with_default_command(["run", "--paused"]) == ["run", "--paused"]
+    assert with_default_command(["--mic", "HyperX"]) == ["run", "--mic", "HyperX"]  # run 自己的选项也能直接写
+    assert with_default_command(["-v", "--set", "a.b=1", "--paused"]) == ["-v", "--set", "a.b=1", "run", "--paused"]
     assert with_default_command(["bench-asr", "x.wav"]) == ["bench-asr", "x.wav"]
     assert with_default_command(["--help"]) == ["--help"] and with_default_command(["--version"]) == ["--version"]

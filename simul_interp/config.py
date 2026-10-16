@@ -16,7 +16,8 @@ ROOT = Path(__file__).resolve().parent.parent
 
 @dataclass
 class AudioConfig:
-    source: str = "system"  # system = 电脑正在播放的声音；file = 用音频文件模拟（调试用）
+    source: str = "system"  # system = 电脑正在播放的声音；mic = 麦克风；file = 用音频文件模拟（调试用）
+    device: str = ""  # 用哪个麦克风：设备名的一部分或编号（python -m simul_interp devices 可以列出来）；空 = 系统默认
     file: str = ""
     file_speed: float = 1.0  # 文件模拟时的播放倍速，1.0 = 实时
 

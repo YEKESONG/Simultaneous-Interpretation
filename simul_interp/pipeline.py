@@ -57,6 +57,7 @@ class Interpreter:
         self.view = view
         self.state = "loading"  # loading（在准备）→ listening（在监听）⇄ paused（暂停）→ ended（结束）
         self.source = create_source(cfg)
+        self.source.on_status = view.on_status  # 比如麦克风没有权限、设备断开：直接显示在界面上
         self.backend = create_backend(cfg)
         if start_paused:
             self.source.pause()

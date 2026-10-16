@@ -171,3 +171,5 @@ class MacSystemAudioSource(AudioSource):
         limit = int(SILENCE_WARNING_S * SAMPLE_RATE)
         if before < limit <= self._silent_samples:
             logger.warning(PERMISSION_HINT)
+            if self.on_status is not None:
+                self.on_status(PERMISSION_HINT)

@@ -22,6 +22,9 @@ def get_config(args: argparse.Namespace) -> Config:
     if getattr(args, "file", None):
         cfg.audio.source = "file"
         cfg.audio.file = str(args.file)
+    elif getattr(args, "mic", None) is not None:
+        cfg.audio.source = "mic"
+        cfg.audio.device = args.mic
     if getattr(args, "speed", None) is not None:
         cfg.audio.file_speed = args.speed
     return cfg
@@ -46,18 +49,19 @@ def cmd_config(args: argparse.Namespace) -> int:
 
 
 def cmd_record(args: argparse.Namespace) -> int:
-    """录一段电脑正在播放的声音存成 WAV，同时每秒显示一次音量，用来检查内录是否正常。"""
+    """录一段电脑正在播放的声音（或者麦克风）存成 WAV，同时每秒显示一次音量，用来检查采集是否正常。"""
     from .audio import SAMPLE_RATE, create_source
     from .audio.util import meter, rms_dbfs, write_wav
 
     cfg = get_config(args)
-    out = args.out or ROOT / "recordings" / f"system_{time.strftime('%Y%m%d_%H%M%S')}.wav"
+    prefix = "mic" if cfg.audio.source == "mic" else "system"
+    out = args.out or ROOT / "recordings" / f"{prefix}_{time.strftime('%Y%m%d_%H%M%S')}.wav"
     out.parent.mkdir(parents=True, exist_ok=True)
 
     source = create_source(cfg)
     blocks: list[np.ndarray] = []
     second: list[np.ndarray] = []
-    print(f"开始录制 {args.seconds:g} 秒（Ctrl+C 可提前结束）……")
+    print(f"开始录制 {args.seconds:g} 秒：{source.name}（Ctrl+C 可提前结束）……")
     source.start()
     try:
         for chunk in source.chunks():
@@ -79,8 +83,29 @@ def cmd_record(args: argparse.Namespace) -> int:
     peak = float(np.abs(audio).max()) if len(audio) else 0.0
     print(f"\n已保存 {out}（{len(audio) / SAMPLE_RATE:.1f} 秒，整体音量 {rms_dbfs(audio):.1f} dBFS，峰值 {peak:.2f}）")
     if not np.any(audio):
-        print("整段都是静音：请确认电脑在播放声音，并检查系统录音权限。")
+        if cfg.audio.source == "mic":
+            from .audio.microphone import PERMISSION_HINT
+
+            print(f"整段都是静音。{PERMISSION_HINT}")
+        else:
+            print("整段都是静音：请确认电脑在播放声音，并检查系统录音权限。")
         return 1
+    return 0
+
+
+def cmd_devices(args: argparse.Namespace) -> int:
+    """列出能用来外录的麦克风（录音设备）。"""
+    from .audio.microphone import list_input_devices
+
+    devices = list_input_devices()
+    if not devices:
+        print("这台电脑上没有找到任何麦克风（录音设备）。")
+        return 1
+    print("能用来外录的设备（* 是系统默认）：")
+    for d in devices:
+        mark = "*" if d.is_default else " "
+        print(f" {mark} [{d.index}] {d.name}（{d.channels} 声道，{d.sample_rate / 1000:g} kHz）")
+    print('\n用某一个：python -m simul_interp run --mic "名字的一部分"（或编号）；只写 --mic 就是系统默认的那个。')
     return 0
 
 
@@ -170,7 +195,14 @@ def cmd_bench_translate(args: argparse.Namespace) -> int:
     return bench_translate(get_config(args), args.sentences)
 
 
-COMMANDS = {"run", "config", "record", "vad", "bench-asr", "bench-pipeline", "bench-translate"}
+COMMANDS = {"run", "config", "record", "devices", "vad", "bench-asr", "bench-pipeline", "bench-translate"}
+
+
+def add_mic_arg(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--mic", nargs="?", const="", default=None, metavar="设备",
+        help="用麦克风外录，不录电脑播放的声音；可以写设备名的一部分或编号（见 devices），不写就用系统默认的",
+    )
 
 
 def add_source_args(p: argparse.ArgumentParser, default_speed: float | None = None) -> None:
@@ -190,6 +222,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("run", help="开始同传（默认内录系统声音）；不写子命令时就是它")
     add_source_args(p)
+    add_mic_arg(p)
     p.add_argument("--ui", choices=["overlay", "console"], default=None, help="界面：控制面板 + 透明字幕窗，或只用终端；默认看配置")
     p.add_argument("--no-translate", action="store_true", help="只识别不翻译")
     p.add_argument("--mock-translate", action="store_true", help="用模拟翻译（不联网），测试流程和界面")
@@ -201,10 +234,14 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("config", help="打印生效的配置")
     p.set_defaults(func=cmd_config)
 
-    p = sub.add_parser("record", help="录一段系统声音存成 WAV，检查内录是否正常")
+    p = sub.add_parser("record", help="录一段系统声音（或者麦克风）存成 WAV，检查采集是否正常")
     p.add_argument("--seconds", type=float, default=10.0, help="录制时长（秒），默认 10")
     p.add_argument("--out", type=Path, default=None, help="输出文件，默认 recordings/system_时间.wav")
+    add_mic_arg(p)
     p.set_defaults(func=cmd_record)
+
+    p = sub.add_parser("devices", help="列出能用来外录的麦克风")
+    p.set_defaults(func=cmd_devices)
 
     p = sub.add_parser("vad", help="只跑语音检测，打印每一段语音的起止时间")
     add_source_args(p, default_speed=0.0)
@@ -228,10 +265,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def with_default_command(argv: list[str]) -> list[str]:
-    """不写子命令就是启动同传：双击启动脚本、直接 python -m simul_interp 都走这里。"""
+    """不写子命令就是启动同传：双击启动脚本、直接 python -m simul_interp 都走这里。
+    run 插在全局选项（--config、--set、-v）后面，这样 run 自己的选项（--mic、--paused……）也能直接写。"""
     if COMMANDS.intersection(argv) or {"-h", "--help", "--version"}.intersection(argv):
         return list(argv)
-    return [*argv, "run"]
+    i = 0
+    while i < len(argv):
+        if argv[i] in ("-v", "--verbose") or argv[i].startswith(("--config=", "--set=")):
+            i += 1
+        elif argv[i] in ("--config", "--set"):
+            i += 2
+        else:
+            break
+    return [*argv[:i], "run", *argv[i:]]
 
 
 def main(argv: list[str] | None = None) -> int:

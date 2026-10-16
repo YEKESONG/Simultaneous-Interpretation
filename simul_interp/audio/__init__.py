@@ -1,4 +1,4 @@
-"""音频源：把“电脑正在播放的声音”或音频文件统一变成 16 kHz 单声道的小块。"""
+"""音频源：把“电脑正在播放的声音”、麦克风或音频文件统一变成 16 kHz 单声道的小块。"""
 
 from __future__ import annotations
 
@@ -21,10 +21,14 @@ def create_source(cfg: Config) -> AudioSource:
 
             return WindowsLoopbackSource()
         raise RuntimeError(f"暂不支持在 {sys.platform} 上内录系统声音（只支持 macOS 和 Windows）")
+    if cfg.audio.source == "mic":
+        from .microphone import MicrophoneSource
+
+        return MicrophoneSource(cfg.audio.device)
     if cfg.audio.source == "file":
         from .file_source import FileAudioSource
 
         if not cfg.audio.file:
             raise ValueError("audio.source = file 时需要用 audio.file 指定音频文件")
         return FileAudioSource(cfg.audio.file, speed=cfg.audio.file_speed)
-    raise ValueError(f"未知的音频源：{cfg.audio.source}（可选 system / file）")
+    raise ValueError(f"未知的音频源：{cfg.audio.source}（可选 system / mic / file）")

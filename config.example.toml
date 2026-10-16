@@ -2,7 +2,8 @@
 # 没写的项使用代码里的默认值，写错的项名会在启动时报错。
 
 [audio]
-source = "system"          # system = 电脑正在播放的声音；file = 用音频文件模拟（调试用）
+source = "system"          # system = 电脑正在播放的声音；mic = 麦克风；file = 用音频文件模拟（调试用）
+# device = "MacBook"       # 用哪个麦克风：设备名的一部分或编号（python -m simul_interp devices 可以列出来）；不写 = 系统默认
 # file = "samples/fr_demo.wav"
 # file_speed = 1.0         # 文件模拟的播放倍速，1.0 = 实时
 
