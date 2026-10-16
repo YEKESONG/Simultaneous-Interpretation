@@ -34,6 +34,12 @@ class FakeInterpreter:
     def set_languages(self, source, target):
         self.calls.append((source, target))
 
+    def set_source(self, kind, device=""):
+        self.calls.append(("source", kind, device))
+        if device == "坏掉的麦克风":
+            raise RuntimeError("打不开麦克风")
+        self.cfg.audio.source, self.cfg.audio.device = kind, device
+
     def output_folders(self):
         return [Path("某个文件夹")] if self.transcript else []
 
@@ -129,3 +135,63 @@ def test_closing_the_panel_only_hides_it(setup):
     assert not panel.isVisible() and overlay.isVisible()  # 同传还在跑，字幕窗也还在
     panel.bring_to_front()
     assert panel.isVisible()
+
+
+def wait_until(condition, timeout=2.0):
+    import time
+
+    deadline = time.monotonic() + timeout
+    while not condition() and time.monotonic() < deadline:
+        QApplication.processEvents()
+        time.sleep(0.01)
+    return condition()
+
+
+def test_audio_input_lists_system_sound_and_every_microphone(setup):
+    panel, _, _ = setup
+    combo = panel.audio_input
+    items = [combo.itemText(i) for i in range(combo.count())]
+    assert items == [
+        "电脑播放的声音",
+        "麦克风：系统默认（MacBook Air麦克风）",
+        "麦克风：HyperX Cloud III Wireless",
+        "麦克风：MacBook Air麦克风",
+    ]
+    assert combo.currentText() == "电脑播放的声音"  # 配置里默认是内录
+
+
+def test_switching_the_audio_input_runs_in_the_background(setup):
+    panel, interpreter, _ = setup
+    interpreter.state = "listening"
+    combo = panel.audio_input
+    combo.setCurrentIndex(combo.findData("mic:HyperX Cloud III Wireless"))
+    panel.apply_input()  # 用户在下拉框里选了一项
+    assert wait_until(lambda: not panel._switching)
+    assert interpreter.calls[-1] == ("source", "mic", "HyperX Cloud III Wireless")
+    assert combo.currentText() == "麦克风：HyperX Cloud III Wireless" and panel.detail.text() == ""
+
+
+def test_failed_switch_goes_back_to_the_input_in_use_and_says_why(setup):
+    panel, interpreter, _ = setup
+    interpreter.state = "listening"
+    combo = panel.audio_input
+    combo.addItem("麦克风：坏掉的麦克风", "mic:坏掉的麦克风")
+    combo.setCurrentIndex(combo.count() - 1)
+    panel.apply_input()
+    assert wait_until(lambda: not panel._switching)
+    assert combo.currentText() == "电脑播放的声音"  # 换回实际在用的
+    assert "切换音源失败：打不开麦克风" in panel.detail.text()
+
+
+def test_microphone_named_in_the_config_is_selected(tmp_path):
+    QApplication.instance() or QApplication([])
+    interpreter = FakeInterpreter()
+    interpreter.cfg.audio.source, interpreter.cfg.audio.device = "mic", "hyperx"  # 名字的一部分
+    overlay = Overlay(UiConfig(), settings=QSettings(str(tmp_path / "o.ini"), QSettings.Format.IniFormat))
+    panel = ControlPanel(interpreter, overlay)
+    assert panel.audio_input.currentText() == "麦克风：HyperX Cloud III Wireless"
+    interpreter.cfg.audio.source, interpreter.cfg.audio.file = "file", "samples/demo.wav"
+    panel.refresh_inputs()
+    panel.sync()
+    assert panel.audio_input.currentText() == "音频文件：demo.wav" and not panel.audio_input.isEnabled()
+    panel._timer.stop()

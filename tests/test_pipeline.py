@@ -225,10 +225,10 @@ def test_pause_ignores_what_is_said_and_resume_picks_up_again(session):
 
     interpreter.pause()
     assert interpreter.state == "paused" and view.status[-1] == "已暂停"
-    position = source.position
+    position = interpreter.source.position  # 整条音频流（也就是录音）走到了哪里
     source._feed(second)  # 暂停期间说的第二句：不识别，也不录
     time.sleep(0.2)
-    assert len(view.units) == 1 and source.position == position
+    assert len(view.units) == 1 and interpreter.source.position == position
 
     interpreter.resume()
     assert interpreter.state == "listening" and view.status[-1] == ""
@@ -245,7 +245,7 @@ def test_pause_ignores_what_is_said_and_resume_picks_up_again(session):
     text = interpreter.transcript.path.read_text(encoding="utf-8")
     assert text.index("Bonjour à tous.") < text.index("暂停后从这里继续") < text.index("Merci beaucoup à vous tous.")
     # 录音里没有暂停的那一段，所以记录里的时间仍然对得上录音
-    assert len(read_wav(interpreter.recorder.path)) == round(source.position * SAMPLE_RATE)
+    assert len(read_wav(interpreter.recorder.path)) == round(interpreter.source.position * SAMPLE_RATE)
 
 
 def test_starting_paused_waits_for_resume(session):
@@ -265,3 +265,44 @@ def test_languages_can_be_switched_at_run_time(session):
     assert "*—— 00:00 起：英语 → English ——*" in text  # 记录里留一行说明
     assert text.index("英语 → English") < text.index("Bonjour à tous.")
     assert interpreter.output_folders() == [interpreter.transcript.path.parent, interpreter.recorder.path.parent]
+
+
+def test_input_can_be_switched_at_run_time(session, monkeypatch):
+    first = ManualSource()
+    interpreter, view = session(source=first)
+    worker = threading.Thread(target=interpreter.run, daemon=True)
+    worker.start()
+    assert wait_for(lambda: interpreter.state == "listening")
+    first._feed(make_audio()[: 3 * SAMPLE_RATE])  # “Bonjour à tous.”
+    assert wait_for(lambda: 0 in view.units)
+
+    mic = ManualSource()
+    mic.name = "麦克风（测试）"
+    monkeypatch.setattr(pipeline, "create_source", lambda cfg: mic)
+    interpreter.set_source("mic", "测试")
+    assert (interpreter.cfg.audio.source, interpreter.cfg.audio.device) == ("mic", "测试")
+    assert interpreter.source.name == "麦克风（测试）"
+
+    def broken(cfg):
+        raise RuntimeError("没有找到「不存在」这个麦克风")
+
+    monkeypatch.setattr(pipeline, "create_source", broken)
+    with pytest.raises(RuntimeError, match="不存在"):
+        interpreter.set_source("mic", "不存在")
+    assert interpreter.cfg.audio.device == "测试"  # 找不到新的：配置和正在用的音源都不变
+
+    mic._feed(make_audio()[3 * SAMPLE_RATE :])  # 换成麦克风以后说的 “Merci beaucoup.”
+    assert wait_for(lambda: 1 in view.units)
+    mic._finish()
+    worker.join(5)
+    text = interpreter.transcript.path.read_text(encoding="utf-8")
+    assert text.index("Bonjour à tous.") < text.index("音源改为「麦克风（测试）」") < text.index("Merci beaucoup.")
+    assert len(read_wav(interpreter.recorder.path)) == round(interpreter.source.position * SAMPLE_RATE)
+
+
+def test_input_of_a_file_session_cannot_be_switched(session):
+    from_file = Config()
+    from_file.audio.source, from_file.audio.file = "file", "demo.wav"
+    interpreter, _ = session(from_file)
+    with pytest.raises(RuntimeError, match="音频文件"):
+        interpreter.set_source("mic")

@@ -16,6 +16,7 @@ from .asr import create_backend
 from .asr.runner import AsrRunner
 from .asr.types import AsrUpdate
 from .audio import AudioChunk, create_source
+from .audio.switchable import SwitchableSource
 from .config import Config
 from .languages import language_name
 from .recording import WavRecorder
@@ -56,7 +57,9 @@ class Interpreter:
         self.cfg = cfg
         self.view = view
         self.state = "loading"  # loading（在准备）→ listening（在监听）⇄ paused（暂停）→ ended（结束）
-        self.source = create_source(cfg)
+        source = create_source(cfg)
+        # 内录和外录在运行中可以互换（控制面板上的“音源”）；用音频文件模拟时不用换
+        self.source = source if cfg.audio.source == "file" else SwitchableSource(source)
         self.source.on_status = view.on_status  # 比如麦克风没有权限、设备断开：直接显示在界面上
         self.backend = create_backend(cfg)
         if start_paused:
@@ -192,6 +195,30 @@ class Interpreter:
         self.translation.reset_context()  # 之前的句子是另一种语言的，不能再当上文
         self._note(f"{language_name(source)} → {target}")
         logger.info("语言改为：%s → %s", language_name(source), target)
+
+    def set_source(self, kind: str, device: str = "") -> None:
+        """运行中换音源：kind 是 "system"（电脑播放的声音）或 "mic"（麦克风；device 是设备名的一部分或编号，
+        空 = 系统默认）。新的打不开时换回原来的，并把错误抛出来（界面上显示原因）。可以在任何线程调用。"""
+        if not isinstance(self.source, SwitchableSource):
+            raise RuntimeError("用音频文件模拟时不能换音源")
+        old = (self.cfg.audio.source, self.cfg.audio.device)
+        if (kind, device) == old:
+            return
+        self.cfg.audio.source, self.cfg.audio.device = kind, device
+        try:
+            new = create_source(self.cfg)  # 麦克风找不到时在这一步就报错，原来的音源不受影响
+        except Exception:
+            self.cfg.audio.source, self.cfg.audio.device = old
+            raise
+
+        def restore():
+            self.cfg.audio.source, self.cfg.audio.device = old
+            return create_source(self.cfg)
+
+        self.source.switch(new, restore)
+        self.asr.reset_context()  # 声音换了来源，之前的句子不能再给识别当上文
+        self._note(f"音源改为「{self.source.name}」")
+        logger.info("音源改为：%s", self.source.name)
 
     def output_folders(self) -> list[Path]:
         """这次会话的记录和录音所在的文件夹（去掉重复的）。"""

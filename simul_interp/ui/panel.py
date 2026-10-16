@@ -1,4 +1,4 @@
-"""控制面板：选语言、开始 / 暂停监听、管理字幕窗。
+"""控制面板：选音源和语言、开始 / 暂停监听、管理字幕窗。
 
 它只是一个遥控器：真正干活的是 Interpreter（后台线程里的同传流水线）和 Overlay（字幕窗）。
 面板每 0.2 秒看一眼它们的状态，把按钮和文字改成对应的样子。所以状态是从哪里变的
@@ -7,7 +7,11 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QTimer, QUrl
+import logging
+import threading
+from pathlib import Path
+
+from PySide6.QtCore import QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
@@ -23,6 +27,8 @@ from PySide6.QtWidgets import (
 
 from ..languages import SOURCE_LANGUAGES, TARGET_LANGUAGES, language_name
 
+logger = logging.getLogger(__name__)
+
 # 状态 → (显示的文字, 圆点的颜色)
 STATES = {
     "loading": ("正在准备……", "#d9a441"),
@@ -37,7 +43,33 @@ BUTTON_STYLE = (
 )
 
 
+def input_devices() -> list:
+    """能用来外录的麦克风；列不出来时（没装 sounddevice、系统没有录音设备）返回空列表，只能用内录。
+    每次都重新扫描，刚插上的设备也能看到（有麦克风开着时不扫描，见 list_input_devices）。"""
+    try:
+        from ..audio.microphone import list_input_devices
+
+        return list_input_devices(rescan=True)
+    except Exception as exc:
+        logger.warning("列不出麦克风：%s", exc)
+        return []
+
+
+class DeviceCombo(QComboBox):
+    """打开下拉列表之前先刷新一遍选项。"""
+
+    def __init__(self, before_open) -> None:
+        super().__init__()
+        self._before_open = before_open
+
+    def showPopup(self) -> None:
+        self._before_open()
+        super().showPopup()
+
+
 class ControlPanel(QWidget):
+    switched = Signal(str)  # 换音源结束（在后台线程里发出）：空字符串 = 成功，否则是失败的原因
+
     def __init__(self, interpreter, overlay) -> None:
         """interpreter：同传流水线（pipeline.Interpreter）；overlay：字幕窗（ui.overlay.Overlay）。"""
         super().__init__()
@@ -48,6 +80,13 @@ class ControlPanel(QWidget):
         self.setFixedWidth(360)
 
         cfg = interpreter.cfg
+        # 音源：电脑播放的声音，或者某一个麦克风。选项的数据是 "system"、"mic:"（系统默认的麦克风）、"mic:设备名"
+        self.audio_input = DeviceCombo(self.refresh_inputs)
+        self.audio_input.activated.connect(self.apply_input)  # 只响应用户自己选，程序改选项时不触发
+        self._switching = False
+        self.switched.connect(self._on_switched)
+        self.refresh_inputs()
+
         self.source = QComboBox()
         for code, name in SOURCE_LANGUAGES.items():
             self.source.addItem(name, code)
@@ -82,6 +121,9 @@ class ControlPanel(QWidget):
         self.quit_button = QPushButton("退出")
         self.quit_button.clicked.connect(QApplication.instance().quit)
 
+        inputs = QHBoxLayout()
+        inputs.addWidget(QLabel("音源"))
+        inputs.addWidget(self.audio_input, 1)
         languages = QHBoxLayout()
         languages.addWidget(self.source, 1)
         languages.addWidget(QLabel("→"))
@@ -96,6 +138,7 @@ class ControlPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 16, 18, 16)
         layout.setSpacing(10)
+        layout.addLayout(inputs)
         layout.addLayout(languages)
         layout.addWidget(self.toggle)
         layout.addWidget(self.state_label)
@@ -126,6 +169,59 @@ class ControlPanel(QWidget):
         elif self.interpreter.state == "paused":
             self.interpreter.resume()
         self.sync()
+
+    def refresh_inputs(self) -> None:
+        """重新列出音源，并选中现在实际在用的那个。"""
+        cfg = self.interpreter.cfg
+        combo = self.audio_input
+        combo.blockSignals(True)
+        combo.clear()
+        if cfg.audio.source == "file":
+            combo.addItem(f"音频文件：{Path(cfg.audio.file).name}", "file")
+        else:
+            combo.addItem("电脑播放的声音", "system")
+            devices = input_devices()
+            if devices:
+                default = next((d for d in devices if d.is_default), devices[0])
+                combo.addItem(f"麦克风：系统默认（{default.name}）", "mic:")
+                for d in devices:
+                    combo.addItem(f"麦克风：{d.name}", f"mic:{d.name}")
+        current = "system" if cfg.audio.source == "system" else f"{cfg.audio.source}:{cfg.audio.device}"
+        index = combo.findData("file" if cfg.audio.source == "file" else current)
+        if index < 0 and cfg.audio.source == "mic":  # 配置里写的是名字的一部分：找名字里含它的那一项
+            spec = cfg.audio.device.lower()
+            index = next(
+                (i for i in range(combo.count()) if combo.itemData(i).startswith("mic:") and spec in combo.itemData(i).lower()),
+                -1,
+            )
+            if index < 0:  # 现在列表里没有（比如设备刚被拔掉）：照样显示出来
+                combo.addItem(f"麦克风：{cfg.audio.device}", current)
+                index = combo.count() - 1
+        combo.setCurrentIndex(max(0, index))
+        combo.blockSignals(False)
+
+    def apply_input(self) -> None:
+        """换音源。在后台线程里换：打开麦克风、启动内录可能要一两秒，不能让界面卡住。"""
+        key = self.audio_input.currentData()
+        if self._switching or key in (None, "file"):
+            return
+        kind, _, device = key.partition(":")
+        self._switching = True
+        self.set_message("正在切换音源……")
+
+        def work() -> None:
+            try:
+                self.interpreter.set_source(kind, device)
+                self.switched.emit("")
+            except Exception as exc:
+                self.switched.emit(f"切换音源失败：{exc}")
+
+        threading.Thread(target=work, name="switch-source", daemon=True).start()
+
+    def _on_switched(self, error: str) -> None:
+        self._switching = False
+        self.refresh_inputs()  # 失败时选回实际在用的那个
+        self.set_message(error)
 
     def apply_languages(self) -> None:
         self.interpreter.set_languages(self.source.currentData(), self.target.currentText())
@@ -158,6 +254,9 @@ class ControlPanel(QWidget):
             label, button_color = "开始监听", "#2e9d57"
         self.toggle.setText(label)
         self.toggle.setEnabled(state in ("listening", "paused"))
+        self.audio_input.setEnabled(
+            not self._switching and state != "ended" and self.interpreter.cfg.audio.source != "file"
+        )
         self.toggle.setStyleSheet(BUTTON_STYLE.format(color=button_color))
         hint = "暂停时不识别、不翻译，录音也跟着停。" if state == "paused" else ""
         self.detail.setText(self.message if self.message not in ("", "已暂停") else hint)
