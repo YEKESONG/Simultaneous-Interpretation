@@ -115,9 +115,37 @@ notepad .env
 
 切换耳机或音箱后，右键字幕窗选择“重新连接音频设备”。
 
-会话记录保存在 `transcripts\`，录音保存在 `recordings\`；记录中每段前的 `[mm:ss]` 对应录音中的位置。录制他人发言前请征得同意。
+会话记录和录音的存放位置见[输出文件](#输出文件)。
 
 常用参数：`--mic` 用麦克风外录，`--paused` 启动后暂不监听，`--no-recording` 不录音，`--ui console` 只在终端输出。全部参数见 `.venv\Scripts\python -m simul_interp --help`。
+
+## 输出文件
+
+每次同传会在项目目录下生成两个同名文件，按开始的日期和时间命名：
+
+| 内容 | 默认位置 |
+|---|---|
+| 会话记录（原文和译文） | `%USERPROFILE%\Simultaneous-Interpretation\transcripts\同传_<日期>_<时间>_译文.md` |
+| 录音 | `%USERPROFILE%\Simultaneous-Interpretation\recordings\同传_<日期>_<时间>.wav` |
+
+例如 `同传_2026-10-16_090000_译文.md` 和 `同传_2026-10-16_090000.wav`。控制面板上的“打开记录和录音所在的文件夹”可以直接打开这两个目录。
+
+- 会话记录是 Markdown 文本。开头写着音源、识别语言、录音文件的路径和开始时间；正文每段是 `[mm:ss]` 加原文，下面一行是译文。`[mm:ss]` 是这段话在录音里的位置（通常比实际开始早 1 秒以内）。中途暂停、换语言、换音源时会插一行说明。记录边同传边写入，程序意外退出时已经翻好的部分也在。
+- 录音是 16 kHz 单声道 WAV，约 115 MB/小时。
+- 用 `--file` 处理音频文件时不另存录音，记录命名为 `<文件名>_译文.md`。
+- `record` 命令录的测试音频保存在 `recordings\system_<时间>.wav`（外录是 `mic_<时间>.wav`）。
+
+修改保存位置：在 `config.toml` 中设置，可以写绝对路径（用正斜杠），目录不存在时会自动创建：
+
+```toml
+[transcript]
+dir = "D:/同传记录"
+
+[recording]
+dir = "D:/同传录音"
+```
+
+不想保存录音：设置 `[recording] enabled = false`，或启动时加 `--no-recording`。录制他人发言前请征得同意。
 
 ## 配置
 
