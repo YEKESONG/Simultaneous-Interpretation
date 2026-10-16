@@ -440,3 +440,30 @@ def test_translation_is_retried_once_if_nothing_came_back():
     unit = stage.feed("Bonjour à tous.", final=False)[0]
     stage.close()
     assert len(attempts) == 2 and unit.translation == "大家好。" and unit.error == ""
+
+
+
+# ---- 日语：按字切的语言 ----
+
+
+def test_japanese_units_end_at_full_width_punctuation_and_are_joined_without_spaces():
+    b = UnitBuilder(language="ja")
+    assert b.add("今 日 は 晴 れ で", False) == []
+    assert b.add("す 。", False) == ["今日は晴れです。"]  # 认得全角句号，拼回去不带空格
+    assert b.add("天 気 予 報 に よ る と 、", False) == []  # 8 个字就遇到逗号：还不切（门槛按字数放大到 16）
+    assert b.clause_min_words == 16 and b.max_words == 50
+    assert b.add("明 日 も 晴 れ る そ う で す ね", True) == ["天気予報によると、明日も晴れるそうですね"]
+
+
+def test_japanese_drafts_wait_for_more_characters():
+    translator = DraftingTranslator()
+    stage = TranslationStage(translator, lambda unit: None, live_draft=True, language="ja")
+    stage.speculate("今 日 は 晴")  # 去掉最末尾那个暂定字还剩 3 个字：不到 6 个字（3 个“词” × 2），先不出草稿
+    assert translator.calls == []
+    stage.speculate("今 日 は 晴 れ で す")
+    assert wait_for(lambda: translator.calls)
+    assert translator.calls[0] == ("今日は晴れで", True, "")  # 送去翻译的原文不带空格
+    assert stage.pending == ""
+    stage.feed("今 日 は", final=False)
+    assert stage.pending == "今日は"
+    stage.close()

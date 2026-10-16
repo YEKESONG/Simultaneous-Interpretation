@@ -64,7 +64,7 @@ class ConsoleView:
             sys.stdout.flush()
             return
         pending, partial = self._pending, self._partial
-        text = f"{pending} {partial}".strip()
+        text = (pending + partial).strip()  # 需要空格时 partial 开头自带
         room = max(10, shutil.get_terminal_size().columns - 4)
         tail = ""
         if self._translation:  # 投机译文：还没确认，青色显示在后面；中文在终端里占两格宽

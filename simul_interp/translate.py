@@ -25,12 +25,13 @@ import httpx
 from .asr.streaming import norm
 from .clock import now
 from .config import TranslateConfig
+from .languages import chars_per_word, join_words
 
 logger = logging.getLogger(__name__)
 
-_STRONG_END = re.compile(r"[.?!][\"'»”)]*$")
-_ELLIPSIS = re.compile(r"(?:\.{2,}|…)[\"'»”)]*$")
-_SOFT_END = re.compile(r"[,;:][\"'»”)]*$")
+_STRONG_END = re.compile(r"[.?!。？！][\"'»”)」』]*$")
+_ELLIPSIS = re.compile(r"(?:\.{2,}|…)[\"'»”)」』]*$")
+_SOFT_END = re.compile(r"[,;:、，；：][\"'»”)」』]*$")
 _INITIAL = re.compile(r"^[A-ZÀ-ÖØ-Þ]\.$")
 # 等半句话的时候，离到点还有这么久才预先送去翻译：翻译服务出第一个字约要 0.7 秒（DEVLOG S11b），
 # 这样真到点时译文正好现成；说话人在这之前接着说了（多数情况），这次请求就省下了
@@ -196,14 +197,24 @@ class UnitBuilder:
       等说话人接着说，或者由调用方等够时间后用 flush() 取走。"""
 
     def __init__(
-        self, clause_min_words: int = 8, max_words: int = 25, hold_incomplete: bool = False, trail_min_words: int = 14
+        self,
+        clause_min_words: int = 8,
+        max_words: int = 25,
+        hold_incomplete: bool = False,
+        trail_min_words: int = 14,
+        language: str = "",
     ) -> None:
-        self.clause_min_words = clause_min_words
-        self.trail_min_words = trail_min_words
-        self.max_words = max_words
+        self._base = (clause_min_words, trail_min_words, max_words)
         self.hold_incomplete = hold_incomplete
         self.pending: list[str] = []
         self.pending_times: list[float | None] = []  # 和 pending 一一对应：每个词在音频流里的时间（秒）
+        self.set_language(language)
+
+    def set_language(self, language: str) -> None:
+        """语言决定一个单元怎么拼回句子；按字切的语言（日语）里一个“词”只是一个字，门槛按字数放大。"""
+        self.language = language
+        scale = chars_per_word(language)
+        self.clause_min_words, self.trail_min_words, self.max_words = (round(v * scale) for v in self._base)
 
     def cut(self, words: list[str]) -> int:
         """words 是从头攒到现在的词，最后一个是刚加进来的。返回应该在第几个词之后切开，0 = 还不切。"""
@@ -247,7 +258,7 @@ class UnitBuilder:
 
     def _take(self, size: int) -> tuple[str, float | None]:
         """取走最前面的 size 个词，剩下的接着攒。"""
-        unit = (" ".join(self.pending[:size]), self.pending_times[0])
+        unit = (join_words(self.pending[:size], self.language), self.pending_times[0])
         self.pending, self.pending_times = self.pending[size:], self.pending_times[size:]
         return unit
 
@@ -343,6 +354,7 @@ class TranslationStage:
         live_draft: bool = False,
         draft_min_words: int = 3,
         draft_step_words: int = 2,
+        language: str = "",
     ) -> None:
         """speculative：开启投机翻译；on_speculation(译文) 在“正在说”那一行的译文更新时调用（投机译文或草稿）。
         live_draft：边说边译。正在说的这句话还没说完，就每隔几个词把已经听到的部分译一版草稿显示出来。
@@ -353,7 +365,7 @@ class TranslationStage:
         on_flush()：这样等到时间、把半句送出去之后调用（在定时器线程里），界面上“正在说”的那一行靠它清掉。"""
         self.translator = translator
         self.on_update = on_update
-        self.builder = UnitBuilder(hold_incomplete=incomplete_wait_s > 0)
+        self.builder = UnitBuilder(hold_incomplete=incomplete_wait_s > 0, language=language)
         self.speculative = speculative and translator is not None
         self.on_speculation = on_speculation or (lambda text: None)
         self.max_speculative_words = max_speculative_words
@@ -384,9 +396,14 @@ class TranslationStage:
 
     @property
     def pending(self) -> str:
-        """已经确认、但还没凑够送去翻译的原文。"""
+        """已经确认、但还没凑够送去翻译的原文（拼好的句子，可以直接显示）。"""
         with self._lock:
-            return " ".join(self.builder.pending)
+            return join_words(self.builder.pending, self.builder.language)
+
+    def set_language(self, language: str) -> None:
+        """换了识别语言：之后的原文按新语言拼句子、算门槛。"""
+        with self._lock:
+            self.builder.set_language(language)
 
     @property
     def next_id(self) -> int:
@@ -418,7 +435,9 @@ class TranslationStage:
         if final:
             self._hold()
             if self.live_draft:  # 留下的半句：这段话已经说完，不会再有新词来凑数了，草稿要译到最后一个词
-                self._want_draft(self.pending.split(), settled=True)
+                with self._lock:
+                    words = list(self.builder.pending)
+                self._want_draft(words, settled=True)
         return units
 
     def speech_started(self) -> None:
@@ -481,7 +500,7 @@ class TranslationStage:
             if token != self._hold_token or self._utterances > 0 or not self.builder.pending:
                 return  # 这次等待已经被取消（有下文了），或者说话人又开口了
             if remaining > 0:
-                source = " ".join(self.builder.pending)
+                source = join_words(self.builder.pending, self.builder.language)
                 self._arm(remaining, token, 0.0)
             else:
                 piece = self.builder.flush()
@@ -507,7 +526,7 @@ class TranslationStage:
         words = pending + partial.split()
         size = self.builder.first_unit(words)
         if self.speculative and size > len(pending) and size - len(pending) <= self.max_speculative_words:
-            self._start_speculation(" ".join(words[:size]))
+            self._start_speculation(join_words(words[:size], self.builder.language))
         if self.live_draft:
             # 暂定文字最末尾那个词最不可靠（实测 28% 之后会变，往前的约 15%）：草稿先不译它，等下一次识别
             steady = words[:-1] if len(words) > len(pending) else words
@@ -610,19 +629,20 @@ class TranslationStage:
         """（持锁调用）要不要出下一版草稿。同一时刻只请求一版：请求一次约 1 秒，这期间又多出来的词，
         等它回来再一起译；这样请求的节奏自然跟着翻译服务的速度走，不会越积越多。"""
         words = self._live_words
-        if self._draft is not None or len(words) < (1 if self._live_settled else self.draft_min_words):
+        scale = chars_per_word(self.builder.language)  # 日语按字算：门槛按字数放大
+        if self._draft is not None or len(words) < (1 if self._live_settled else round(self.draft_min_words * scale)):
             return None
-        key = unit_key(" ".join(words))
+        key = tuple(norm(word) for word in words)
         same = 0
         for new, old in zip(key, self._drafted):
             if new != old:
                 break
             same += 1
-        if len(key) - same < (1 if self._live_settled else self.draft_step_words):
+        if len(key) - same < (1 if self._live_settled else round(self.draft_step_words * scale)):
             return None  # 比上一版多出来（或者改了）的词还不够多
         self._seq += 1
         # 暂定文字末尾的句号、省略号多半是识别模型顺手加的，不代表话说完了：不给翻译模型看，免得它也跟着收尾
-        source = " ".join(words).rstrip(".… ")
+        source = join_words(words, self.builder.language).rstrip(".…。 ")
         job = DraftJob(source, key, list(self._context), self._draft_text if same else "", self._seq)
         self._draft = job
         self.stats["drafted"] += 1

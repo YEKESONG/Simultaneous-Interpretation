@@ -148,10 +148,10 @@ def pair_html(unit: UnitSnapshot, zh: int, fr: int) -> str:
 
 
 def live_html(pending: str, partial: str, fr: int) -> str:
-    """正在识别的原文：已确认的部分白色，暂定的尾巴灰色。"""
+    """正在识别的原文：已确认的部分白色，暂定的尾巴灰色。两段直接接在一起（需要空格时 partial 自带）。"""
     done_color, guess_color = LIVE_COLORS
     return (
-        f'<p style="margin:0; color:{done_color}; font-size:{fr}px;">{html.escape(pending)} '
+        f'<p style="margin:0; color:{done_color}; font-size:{fr}px;">{html.escape(pending)}'
         f'<span style="color:{guess_color};">{html.escape(partial)}</span></p>'
     )
 

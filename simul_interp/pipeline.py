@@ -18,7 +18,7 @@ from .asr.types import AsrUpdate
 from .audio import AudioChunk, create_source
 from .audio.switchable import SwitchableSource
 from .config import Config
-from .languages import language_name
+from .languages import join_words, language_name, uses_spaces
 from .recording import WavRecorder
 from .transcript import TranscriptWriter, format_position
 from .translate import ChatTranslator, MockTranslator, TranslationStage, TranslationUnit
@@ -32,8 +32,9 @@ CONFIRM_LAG_S = 2.0
 
 class View(Protocol):
     def on_live(self, pending: str, partial: str, translation: str = "") -> None:
-        """正在说的话：pending = 已确认但还没送去翻译的法语，partial = 还没确认的暂定尾巴，
-        translation = 这句话到目前为止的译文（草稿或投机译文：话还没说完、原文还没确认，可能会变）。"""
+        """正在说的话：pending = 已确认但还没送去翻译的原文，partial = 还没确认的暂定尾巴，
+        translation = 这句话到目前为止的译文（草稿或投机译文：话还没说完、原文还没确认，可能会变）。
+        两段都已经按语言拼好，界面直接接在一起显示：用空格的语言里，partial 开头自带一个空格。"""
 
     def on_unit(self, unit: TranslationUnit) -> None:
         """一段原文送去翻译（译文为空）、译文流式更新、翻译完成时都会调用。"""
@@ -88,6 +89,7 @@ class Interpreter:
             live_draft=cfg.translate.live_draft,
             draft_min_words=cfg.translate.draft_min_words,
             draft_step_words=cfg.translate.draft_step_words,
+            language=cfg.asr.language,
         )
         self._live = ("", "")  # 最近一次的 (pending, partial)，投机译文更新时要一起重新显示
         self.asr = AsrRunner(cfg, self.backend, self._on_asr, on_speech_start=self.translation.speech_started)
@@ -190,6 +192,7 @@ class Interpreter:
         self.cfg.asr.language = source
         self.cfg.translate.target_language = target  # 翻译的提示词每次请求时现读配置，改了就生效
         self.asr.set_language(source)
+        self.translation.set_language(source)
         if isinstance(self.translator, ChatTranslator):
             self.translator.source_language = language_name(source)
         self.translation.reset_context()  # 之前的句子是另一种语言的，不能再当上文
@@ -267,8 +270,17 @@ class Interpreter:
         self.translation.feed(update.committed, update.final, [heard] * len(update.committed.split()))
         if not update.final:
             self.translation.speculate(update.partial)
-        self._live = (self.translation.pending, update.partial)
+        self._live = self._display(self.translation.pending, update.partial)
         self.view.on_live(*self._live, self.translation.live_translation)
+
+    def _display(self, pending: str, partial: str) -> tuple[str, str]:
+        """整理成界面显示的样子：partial 是识别给的、用空格隔开的词，按语言拼起来（日语不加空格）；
+        用空格的语言里，已确认部分和暂定部分之间留一个空格。"""
+        language = self.cfg.asr.language
+        tail = join_words(partial.split(), language)
+        if tail and pending and uses_spaces(language):
+            tail = " " + tail
+        return pending, tail
 
     def _on_speculation(self, text: str) -> None:
         self.view.on_live(*self._live, text)

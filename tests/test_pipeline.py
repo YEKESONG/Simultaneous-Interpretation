@@ -73,8 +73,9 @@ class FakeVad:
 class LevelBackend:
     """假的识别后端：靠幅度认词；还没说完的词只“听”到前一半（模拟不稳定的尾巴）。"""
 
-    def __init__(self, words=WORDS):
+    def __init__(self, words=WORDS, language="fr"):
         self.words = words
+        self.language = language
         self.prompts = []  # 每次识别拿到的上文提示
 
     def load(self):
@@ -111,7 +112,7 @@ class View:
         self.units, self.status = {}, []
 
     def on_live(self, pending, partial, translation=""):
-        pass
+        self.live = getattr(self, "live", []) + [(pending, partial)]
 
     def on_unit(self, unit):
         self.units[unit.id] = unit
@@ -130,7 +131,7 @@ def session(tmp_path, monkeypatch):
     """返回一个函数：按给定的选项建一个 Interpreter（内录、不翻译），输出都写到临时目录。"""
     script = {"words": WORDS, "times": TIMES, "source": None}
     monkeypatch.setattr(pipeline, "create_source", lambda cfg: script["source"] or FakeSource(script["times"]))
-    monkeypatch.setattr(pipeline, "create_backend", lambda cfg: LevelBackend(script["words"]))
+    monkeypatch.setattr(pipeline, "create_backend", lambda cfg: LevelBackend(script["words"], cfg.asr.language))
     monkeypatch.setattr(runner, "SileroVad", FakeVad)
 
     def make(cfg=None, words=WORDS, times=TIMES, source=None, **options):
@@ -306,3 +307,17 @@ def test_input_of_a_file_session_cannot_be_switched(session):
     interpreter, _ = session(from_file)
     with pytest.raises(RuntimeError, match="音频文件"):
         interpreter.set_source("mic")
+
+
+def test_japanese_is_split_into_characters_and_shown_without_spaces(session):
+    """日语不用空格分词：按字确认、按“。”切句，显示和送去翻译的原文都不带空格。"""
+    cfg = Config()
+    cfg.asr.language = "ja"
+    words = ["今日は", "晴れ", "です。", "ありがとう", "ございます。"]
+    times = [(1.0, 1.3), (1.36, 1.66), (1.72, 2.02), (3.5, 3.9), (3.96, 4.3)]
+    interpreter, view = session(cfg, words=words, times=times)
+    interpreter.run()
+    assert [view.units[i].source for i in sorted(view.units)] == ["今日は晴れです。", "ありがとうございます。"]
+    assert all(" " not in pending + partial for pending, partial in view.live)  # 正在说的那一行也不带空格
+    text = interpreter.transcript.path.read_text(encoding="utf-8")
+    assert "今日は晴れです。" in text and "- 识别语言：日语" in text

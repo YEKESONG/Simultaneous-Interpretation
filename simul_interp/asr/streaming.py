@@ -28,11 +28,12 @@ import numpy as np
 
 from ..audio.base import SAMPLE_RATE
 from ..clock import now
+from ..languages import chars_per_word, join_words, split_words, uses_spaces
 from .common import is_filler
 from .types import AsrBackend, AsrUpdate, Segment
 
 _NON_WORD = re.compile(r"[^\w'’-]+")
-_SENTENCE_END = re.compile(r"[.?!…][\"'»”)]*$")
+_SENTENCE_END = re.compile(r"[.?!…。？！][\"'»”)」』]*$")
 MIN_UTTERANCE_S = 0.45  # 从开始（含 0.2 秒句首预留）到停止说话不足这么长的，多半是杂音，不识别
 HISTORY_WORDS = 200
 MAX_WORDS_PER_S = 6.0  # 正常法语语速约每秒 3 个词，快的也很少超过 5 个
@@ -46,7 +47,7 @@ POST_TRIM_MIN_SPEECH_S = 0.4
 # 杂音上这个概率很不稳定（缓冲区挪几毫秒就能差 0.3），所以每一次识别都重新核实，不沿用上一次的结论
 MIN_FILLER_PROB = 0.7
 DISCARD_KEEP_S = 0.2  # 扔掉被判为杂音的那段声音时，最后留这么多：万一这时正好有人开口，开头不会被切掉
-_CLAUSE_END = re.compile(r"[,;:.?!…][\"'»”)]*$")
+_CLAUSE_END = re.compile(r"[,;:.?!…、，；：。？！][\"'»”)」』]*$")
 
 
 def norm(word: str) -> str:
@@ -86,13 +87,13 @@ def common_prefix(a: list[str], b: list[str]) -> int:
     return count
 
 
-def strip_repetition(words: list[str], min_repeats: int = 3) -> list[str]:
+def strip_repetition(words: list[str], min_repeats: int = 3, max_n: int = 4) -> list[str]:
     """Whisper 偶尔陷入重复循环（实测：“de la version de la version de la version…”）。
     同一个 2~4 词的短语连续出现 min_repeats 次以上，就只保留第一次；单个词要连续 min_repeats+1 次才算，
     因为 “non non non” 这种可能是真的。"""
     normalized = [norm(w) for w in words]
     for i in range(len(words)):
-        for n in range(1, 5):
+        for n in range(1, max_n + 1):
             gram = normalized[i : i + n]
             if len(gram) < n:
                 break
@@ -104,28 +105,42 @@ def strip_repetition(words: list[str], min_repeats: int = 3) -> list[str]:
     return words
 
 
-def repeated_head(hyp: list[str], history: list[str], max_n: int = 5) -> int:
-    """切缓冲区后，新结果的开头可能重复上一句最后几个词（切点比真正的词尾稍早）。返回应跳过的词数。"""
-    for n in range(min(max_n, len(hyp), len(history)), 0, -1):
+def repeated_head(hyp: list[str], history: list[str], max_n: int = 5, min_n: int = 1) -> int:
+    """切缓冲区后，新结果的开头可能重复上一句最后几个词（切点比真正的词尾稍早）。返回应跳过的词数。
+    min_n：至少重复几个词才算。按字切的语言里，一个字碰巧相同太常见，要求多几个。"""
+    for n in range(min(max_n, len(hyp), len(history)), min_n - 1, -1):
         if [norm(w) for w in hyp[:n]] == [norm(w) for w in history[-n:]]:
             return n
     return 0
 
 
-def flatten(segments: list[Segment]) -> tuple[list[str], list[int], list[tuple[float, float]] | None]:
-    """把分段展开成词列表。ends[s] = 第 s 段最后一个词之后的下标；
+def flatten(
+    segments: list[Segment], language: str = ""
+) -> tuple[list[str], list[int], list[tuple[float, float]] | None]:
+    """把分段展开成词列表（怎么切成词看语言，见 languages.split_words）。ends[s] = 第 s 段最后一个词之后的下标；
     有逐词时间戳时同时返回每个词的 (开始, 结束)，否则第三项为 None。"""
     timed = bool(segments) and all(segment.words for segment in segments)
     words: list[str] = []
     ends: list[int] = []
     times: list[tuple[float, float]] = []
     for segment in segments:
-        if timed:
+        if not timed:
+            words.extend(split_words(segment.text, language))
+        elif uses_spaces(language):
             for start, end, text in segment.words:
                 words.append(text)
                 times.append((start, end))
-        else:
-            words.extend(segment.text.split())
+        else:  # 按字切的语言：Whisper 给的是几个字一组的时间，组里的字平分这段时间
+            for start, end, text in segment.words:
+                pieces = split_words(text, language)
+                for k, piece in enumerate(pieces):
+                    if words and not norm(piece).strip("'’-") and not any(ch.isalnum() for ch in piece):
+                        words[-1] += piece  # 单独成组的标点粘到前一个字上
+                        times[-1] = (times[-1][0], end)
+                        continue
+                    span = (end - start) / len(pieces)
+                    words.append(piece)
+                    times.append((start + k * span, start + (k + 1) * span))
         ends.append(len(words))
     return words, ends, times if timed else None
 
@@ -166,6 +181,19 @@ class StreamingTranscriber:
         self._made_up = 0  # 连续几次识别的结果被判为“对着杂音编的”
 
     @property
+    def language(self) -> str:
+        """识别的语言（运行中可能会换）。决定怎么切成词、怎么拼回句子。"""
+        return getattr(self.backend, "language", "") or ""
+
+    @property
+    def _scale(self) -> float:
+        """按词数设的门槛要乘的倍数：按字切的语言里，一个“词”只是一个字。"""
+        return chars_per_word(self.language)
+
+    def _align(self, committed: list[str], hyp: list[str]) -> int:
+        return align_prefix(committed, hyp, window=round(4 * self._scale))
+
+    @property
     def buffer_s(self) -> float:
         return len(self.buffer) / SAMPLE_RATE
 
@@ -185,7 +213,7 @@ class StreamingTranscriber:
             if size > self.prompt_chars:
                 break
             words.append(word)
-        return " ".join(reversed(words))
+        return join_words(list(reversed(words)), self.language)
 
     # ---- 输入 ----
 
@@ -219,15 +247,16 @@ class StreamingTranscriber:
     def _covered(self, hyp: list[str]) -> int:
         """hyp 里有多少个开头的词已经确认过（已发出去）。"""
         if self._after_trim and not self.committed:
-            return repeated_head(hyp, self.history)
-        return align_prefix(self.committed, hyp)
+            spaced = uses_spaces(self.language)
+            return repeated_head(hyp, self.history, max_n=round(5 * self._scale), min_n=1 if spaced else 3)
+        return self._align(self.committed, hyp)
 
     def _recognize(self, word_timestamps: bool = False):
-        max_tokens = int(self.buffer_s * TOKENS_PER_S) + 20
+        max_tokens = int(self.buffer_s * TOKENS_PER_S * self._scale) + 20
         segments = self.backend.transcribe(self.buffer, self.prompt(), word_timestamps, max_tokens)
-        hyp, ends, times = flatten(segments)
-        limit = int(self.buffer_s * MAX_WORDS_PER_S) + 3  # 语速上限，截掉“编出来”的部分
-        return segments, strip_repetition(hyp[:limit]), ends, times
+        hyp, ends, times = flatten(segments, self.language)
+        limit = int(self.buffer_s * MAX_WORDS_PER_S * self._scale) + 3  # 语速上限，截掉“编出来”的部分
+        return segments, strip_repetition(hyp[:limit], max_n=round(4 * self._scale)), ends, times
 
     def _is_made_up(self, hyp: list[str], covered: int) -> bool:
         """整个结果只有一句 “Merci.” 时，向识别模型核实它是不是对着杂音编的。
@@ -347,7 +376,7 @@ class StreamingTranscriber:
         seconds = self.quiet_point(seconds)
         if not 0 < seconds < self.buffer_s:
             return
-        moved = align_prefix(hyp_before_cut, self.committed)
+        moved = self._align(hyp_before_cut, self.committed)
         self.history = (self.history + self.committed[:moved])[-HISTORY_WORDS:]
         self.committed = self.committed[moved:]
         self.buffer = self.buffer[int(seconds * SAMPLE_RATE) :]
@@ -388,18 +417,20 @@ class StreamingTranscriber:
     def _force_trim(self) -> list[str]:
         """一直在说话、长时间没有句号，缓冲区超长又没有可切的分段时：
         用一次逐词时间戳，在倒数 2 秒处强制切开，切点之前的词直接确认。"""
-        max_tokens = int(self.buffer_s * TOKENS_PER_S) + 20
+        max_tokens = int(self.buffer_s * TOKENS_PER_S * self._scale) + 20
         segments = self.backend.transcribe(self.buffer, self.prompt(), True, max_tokens)
-        timed = [w for segment in segments for w in segment.words]
+        timed = [segment for segment in segments if segment.words]  # 没有逐词时间的分段不用（和以前一样）
+        texts, _, times = flatten(timed, self.language)
+        if not timed:
+            return []
         keep_from = self.buffer_s - 2.0
-        before = [i for i, (_, end, _) in enumerate(timed) if end <= keep_from]
+        before = [i for i, (_, end) in enumerate(times) if end <= keep_from]
         if not before:
             return []
         count = before[-1] + 1
-        texts = [text for _, _, text in timed]
-        covered = align_prefix(self.committed, texts)
+        covered = self._align(self.committed, texts)
         forced = texts[covered:count] if covered < count else []
         self.committed += forced
-        self._cut(timed[count - 1][1], texts[:count])
+        self._cut(times[count - 1][1], texts[:count])
         self.tail = texts[max(covered, count) :]
         return forced
