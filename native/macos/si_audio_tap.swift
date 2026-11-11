@@ -12,6 +12,8 @@
 // 6. 权限归属：macOS 把“系统录音”权限记在“负责进程”（启动它的应用，如终端、Claude）头上。
 //    没权限时系统不报错，只给全零的静音。所以程序启动后先用 responsibility_spawnattrs_setdisclaim
 //    重新启动自己、声明“我自己负责”，这样权限弹窗显示的是 si-audio-tap 本身，从哪里启动都一样。
+// 7. 启动它的进程（Python）一退出就跟着退出：Python 被强制结束或崩溃时来不及通知我们，
+//    而电脑没声音时我们几乎不写 stdout、发现不了管道已断，所以每一层进程都盯着自己的父进程。
 
 import AVFoundation
 import CoreAudio
@@ -175,6 +177,28 @@ final class SystemAudioTap {
     }
 }
 
+// ---- 父进程退出时跟着退出 ----
+
+var parentWatchers: [DispatchSourceProcess] = []
+
+/// 父进程退出时在 queue 上调用一次 onExit。
+/// 父进程一退出，我们就被 launchd 收养；如果启动时 getppid() 已经是 1，说明启动我们的进程已经不在了。
+/// 注册时父进程刚好退出也没关系：对不存在的进程注册，libdispatch 会立刻补发一个退出事件。
+func watchParent(queue: DispatchQueue, onExit: @escaping () -> Void) {
+    let parent = getppid()
+    guard parent > 1 else {
+        queue.async(execute: onExit)
+        return
+    }
+    let source = DispatchSource.makeProcessSource(identifier: parent, eventMask: .exit, queue: queue)
+    source.setEventHandler {
+        source.cancel()
+        onExit()
+    }
+    source.resume()
+    parentWatchers.append(source)
+}
+
 // ---- 权限归属：重新启动自己，并声明由自己负责 ----
 
 // libSystem 导出但没有公开头文件的函数（Qt Creator、LLDB 等工具也用它做同样的事）
@@ -186,6 +210,8 @@ let disclaimedEnv = "SI_AUDIO_TAP_DISCLAIMED"
 
 /// 以“自己负责”的身份重新启动自己，父进程只负责转发信号、等待子进程并返回它的退出码。
 /// 子进程继承 stdout/stderr，所以 Python 端读到的数据不受影响。
+/// 这样一共两层进程：Python → 外层（这里，等待中）→ 内层（真正内录）。外层盯着 Python，
+/// Python 一退出就让内层清理退出；内层盯着外层，外层被强制结束时内层也能自己退出。
 func relaunchAsResponsibleProcess() {
     guard getenv(disclaimedEnv) == nil, let executable = Bundle.main.executablePath else { return }
     setenv(disclaimedEnv, "1", 1)
@@ -207,8 +233,13 @@ func relaunchAsResponsibleProcess() {
             if childPID > 0 { kill(childPID, received) }
         }
     }
+    // 主线程下面要阻塞在 waitpid 里，所以监视放在单独的队列上
+    watchParent(queue: DispatchQueue(label: "si-audio-tap.parent")) {
+        if childPID > 0 { kill(childPID, SIGTERM) }
+    }
     var status: Int32 = 0
     while waitpid(child, &status, 0) < 0 && errno == EINTR {}
+    childPID = 0  // 子进程已回收，进程号可能被别的程序重用，之后不能再往它发信号
     let exited = (status & 0x7f) == 0
     exit(exited ? (status >> 8) & 0xff : 1)
 }
@@ -230,7 +261,9 @@ while let argument = arguments.next() {
         }
         sampleRate = rate
     case "-h", "--help":
-        print("用法：si-audio-tap [--sample-rate 16000]\n内录系统声音，stdout 输出单声道 float32 PCM，stderr 输出 JSON 日志。")
+        print(
+            "用法：si-audio-tap [--sample-rate 16000]\n内录系统声音，stdout 输出单声道 float32 PCM，stderr 输出 JSON 日志。"
+                + "\n启动它的进程退出后，它也会自动清理并退出。")
         exit(0)
     default:
         logEvent("error", ["message": "未知参数 \(argument)"])
@@ -270,5 +303,9 @@ for signalNumber in [SIGINT, SIGTERM] {
     source.resume()
     signalSources.append(source)
 }
+
+// 启动我们的进程（外层，或者没能重新启动时就是 Python）退出了：清理后退出。
+// 放在 tap.start() 之后，免得和还没完成的启动同时操作 tap；启动期间外层发来的 SIGTERM 按默认方式直接结束进程。
+watchParent(queue: controlQueue) { shutdown(0, reason: "parent_exited") }
 
 dispatchMain()
