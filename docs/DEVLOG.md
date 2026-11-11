@@ -48,6 +48,7 @@
 - [x] S36 控制面板上选音源，运行中在内录和各个麦克风之间切换
 - [x] S37 源语言加上日语：不用空格分词的语言按字切分
 - [x] S38 README 写明同传后的录音和译文存在哪里
+- [x] S39 程序一启动就闪退（共用的 conda 环境装了别的包，出现两份 OpenMP）：给项目建专属的纯净环境
 
 ---
 
@@ -1366,3 +1367,24 @@ S13 的做法是干脆不显示暂定文字，而用户其实想看到正在说�
 **验证**：两份 README 的页内链接全部有效；pytest 全部通过。
 
 **经验**：使用者最常问的往往是“东西存哪儿了”。路径要写成能直接复制、能在文件管理器里找到的完整形式，而不是只写相对目录名。
+
+## S39 · 程序一启动就闪退：给项目建专属的纯净环境（2026-11-11）
+
+**问题**：源代码没动过，程序却一启动就闪退。系统的崩溃报告显示，进程在加载 PyTorch 时被 OpenMP 运行库主动终止（SIGABRT）；`.venv/bin/python -c "import torch"` 就能复现：`OMP: Error #15: Initializing libomp.dylib, but found libomp.dylib already initialized`。原因在环境：本机的 `.venv` 一直借用 `ml` conda 环境（`--system-site-packages`），而 11 月 9 日往 `ml` 环境里装了 opencv、matplotlib、scikit-learn 等包，conda 顺带把 numpy 用的 OpenBLAS 换成了 OpenMP 版，并装上了 conda 自己的 `libomp.dylib`。从此 `import numpy` 会加载 conda 的那份 OpenMP，PyTorch 又自带一份；同一个进程里出现两份，后初始化的那份检测到冲突就终止程序。闪退时已经启动的内录子进程 `si-audio-tap` 成了孤儿进程留在后台，手动结束了。
+
+**做法**：
+- 第一次尝试：用 `ml` 环境的 Python 建一个不继承任何包的 venv。`import torch` 不崩了，但字幕窗模式运行时还是崩：numba（mlx-whisper 用它）的线程池链接的是 `@rpath/libomp.dylib`，而 conda 的 Python 解释器会到它自己环境的 `lib/` 里找动态库，又找到了 `ml` 环境的那份。只隔离 Python 包不够，解释器本身也不能带着别的环境的库目录。
+- 最终做法（用户的意见：给这个应用建一个专属的纯净虚拟环境，每次运行都用它，名字就用项目名）：新建 conda 环境 `Simultaneous-Interpretation`，里面只有 Python 3.12 本身（`lib/` 里没有 OpenMP、OpenBLAS、TBB），只拿它当解释器；用它在项目里重建 `.venv`（不继承系统包，提示符显示项目名），依赖只按 `requirements.txt` 装。双击启动脚本和 README 里的命令都是 `.venv/bin/python`，不用改。
+- 旧环境改名为 `.venv-ml-backup` 留作备份，`.gitignore` 改成忽略所有 `.venv` 开头的目录。`ml` 环境本身没有动：别的项目在用它，里面做音频文件转写的 mlx-whisper 照常能用。
+- macOS 版 README：安装第 3 步改用 `/opt/homebrew/bin/python3.12` 建环境（装了 conda 的电脑上，`python3.12` 可能指向 conda 的 Python，会踩同样的坑）；常见问题加一行 `OMP: Error #15`。
+- 没有用 `KMP_DUPLICATE_LIB_OK=TRUE` 绕过：OpenMP 自己的提示也说这样可能崩溃或者悄悄算错。
+
+**主要文件**：`.gitignore`、`CLAUDE.md`、`README.macos.md`（环境本身不进仓库）
+
+**验证**：
+- 新 `.venv`：pytest 159 个全部通过；
+- 用真实识别模型跑样例：终端模式、字幕窗模式（不上屏）都正常结束，各记录 13 段。用 `DYLD_PRINT_LIBRARIES` 看，同传进程只加载了一份 OpenMP（PyTorch 自带的），没有加载 `ml` 环境里的任何库（用到 `ml` 环境的只有读音频文件时调用的 ffmpeg，它是单独的进程，不会冲突）；
+- 按日常方式（内录 + 字幕窗）启动 25 秒再 Ctrl+C：正常退出，内录进程也跟着退出；
+- 双击启动脚本用的是新环境，跑通字幕窗模式；`devices` 能列出麦克风。
+
+**经验**：共用的环境会被别的项目悄悄改坏：装一个看起来无关的包，conda 可能顺带换掉底层的数学库。应用要有自己的环境，而且解释器本身也要干净——包隔离了，解释器的动态库搜索路径还可能指回原来的环境。

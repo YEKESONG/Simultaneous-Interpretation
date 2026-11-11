@@ -8,7 +8,8 @@
 - 提交前跑一遍 `.venv/bin/python -m pytest`（Windows 上是 `.venv\Scripts\python -m pytest`）。
 
 ## 运行环境
-- macOS 本机：`.venv` 基于 `ml` conda 环境（`--system-site-packages`），直接用 `.venv/bin/python`。
+- macOS 本机：`.venv` 是这个项目专属的纯净环境，运行和测试都直接用 `.venv/bin/python`。它用 conda 环境 `Simultaneous-Interpretation` 里的 Python 3.12 创建，不继承任何系统包，依赖只按 `requirements.txt` 装。那个 conda 环境只装 Python 本身，不要往里装任何包；也不要再让 `.venv` 借用 `ml` 环境（S39：`ml` 环境装了别的包之后出现两份 OpenMP，程序一启动就闪退）。重建：
+  `/opt/homebrew/Caskroom/miniforge/base/envs/Simultaneous-Interpretation/bin/python3 -m venv --prompt Simultaneous-Interpretation .venv`，再 `.venv/bin/pip install -r requirements.txt pytest`。
 - 实时同传的识别模型默认用 `mlx-community/whisper-large-v3-turbo`（用户 2026-10-01 决定，依据见 DEVLOG S12）。用户的全局规定：**音频文件转写任务仍然只用完整版 `mlx-community/whisper-large-v3-mlx`**。不要下载其他语音识别模型，需要换模型先问用户。
 - `bench-asr` 的计时参照（`samples/*.ref.json`）由完整版 large-v3 生成，比较不同模型时沿用同一份，不要删。
 - 翻译 API 的密钥只放在 `.env`，永远不要提交，也不要打印出来。

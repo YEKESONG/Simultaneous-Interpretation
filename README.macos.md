@@ -54,7 +54,7 @@ brew install python@3.12
 ```bash
 git clone https://github.com/YEKESONG/Simultaneous-Interpretation.git
 cd Simultaneous-Interpretation
-python3.12 -m venv .venv
+/opt/homebrew/bin/python3.12 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
@@ -153,6 +153,7 @@ cp config.example.toml config.toml
 |---|---|
 | `command not found: brew` | 运行安装第 2 步中的两行 `eval` / `echo` |
 | 提示本地没有找到识别模型 | 完成安装第 4 步 |
+| 启动后立刻闪退，终端里有 `OMP: Error #15` | `.venv` 是用 conda 等其他环境的 Python 建的，加载了两份 OpenMP。删掉 `.venv`，按安装第 3 步重建 |
 | 字幕窗没有文字 | 检查系统录音权限（安装第 6 步） |
 | 只有原文，没有译文 | 检查 `.env` 中的密钥和账户余额 |
 | 外录时提示“麦克风一直没有声音” | 系统设置 → 隐私与安全性 → 麦克风，允许启动程序的应用（如“终端”），然后重启程序 |
